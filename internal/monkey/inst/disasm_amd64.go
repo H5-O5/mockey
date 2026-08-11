@@ -53,6 +53,12 @@ func calcFnAddrRange(name string, fn func()) (uintptr, uintptr) {
 	return 0, 0
 }
 
+// padByte is what the amd64 linker writes between functions.
+// See cmd/link/internal/amd64/obj.go: CodePad = []byte{0xCC} (INT $3),
+// emitted to pad each function entry up to funcAlign = 32
+// (cmd/link/internal/amd64/l.go).
+const padByte = 0xcc
+
 func Disassemble(code []byte, required int, checkLen bool) int {
 	var pos int
 	var err error
@@ -62,7 +68,18 @@ func Disassemble(code []byte, required int, checkLen bool) int {
 		inst, err = x86asm.Decode(code[pos:], 64)
 		tool.Assert(err == nil, err)
 		tool.DebugPrintf("Disassemble: %3d\t0x%x\t%v\n", pos, common.PtrOf(code)+uintptr(pos), inst)
-		tool.Assert(inst.Op != x86asm.RET || !checkLen, "function is too short to patch")
+		if inst.Op == x86asm.RET {
+			// The target's own code ends here, so it is shorter than the branch
+			// sequence we need to write. That is only fatal if the remaining bytes
+			// belong to the *next* function. On amd64 they do not: the linker aligns
+			// every function entry to 32 bytes and fills the gap with 0xCC, which is
+			// dead space no control flow ever enters. Overwriting it is harmless, so
+			// only refuse when the tail is not padding.
+			for i := pos + inst.Len; i < required; i++ {
+				tool.Assert(code[i] == padByte || !checkLen, "function is too short to patch")
+			}
+			return required
+		}
 		pos += inst.Len
 	}
 	return pos
