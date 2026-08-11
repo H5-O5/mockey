@@ -31,6 +31,11 @@ type Patch struct {
 	size int
 	code []byte
 	base uintptr
+	// orig holds the exact bytes that were at the entry before patching.
+	// The default path can restore from code[:size] because it copies the
+	// original instructions verbatim; the short-patch path relocates them,
+	// so it must remember the originals separately.
+	orig []byte
 }
 
 // Base returns the address of the patched function.
@@ -40,7 +45,11 @@ func (p *Patch) Base() uintptr {
 
 // Unpatch restores the patched function to the original function.
 func (p *Patch) Unpatch() {
-	mem.WriteWithSTW(p.base, p.code[:p.size])
+	restore := p.code[:p.size]
+	if p.orig != nil {
+		restore = p.orig
+	}
+	mem.WriteWithSTW(p.base, restore)
 	common.ReleasePage(p.code)
 }
 
@@ -51,6 +60,19 @@ func PatchValue(target, hook, proxy reflect.Value, unsafe bool) *Patch {
 	tool.Assert(proxy.Kind() == reflect.Ptr, "'%v' is not a function pointer", proxy.Kind())
 
 	targetAddr := target.Pointer()
+	// Targets too small to hold the long-jump entry sequence get a 4-byte
+	// branch to a nearby trampoline instead. On platforms without that
+	// strategy this is always false and the code below is unchanged.
+	//
+	// `unsafe` callers are excluded on purpose: passing unsafe=true tells
+	// Disassemble to ignore the RET it finds and patch anyway, because the
+	// caller knows the bytes after the RET still belong to the target (this is
+	// how generic function analysis patches a shared instantiation stub).
+	// Rerouting those to the short path would honour a RET the caller
+	// explicitly asked us to disregard, changing established behaviour.
+	if !unsafe && useShortPatch(targetAddr, len(inst.BranchInto(0))) {
+		return PatchValueShort(target, hook, proxy, unsafe)
+	}
 	// The first few bytes of the target function code
 	const bufSize = 64
 	targetCodeBuf := common.BytesOf(targetAddr, bufSize)
