@@ -60,6 +60,16 @@ func PatchValue(target, hook, proxy reflect.Value, unsafe, generic bool) *Patch 
 
 	// construct the proxy code
 	proxyCode := common.AllocatePage()
+	// cuttingIdx is no longer guaranteed to equal len(hookCode): when the target
+	// ends in an early RET, Disassemble rounds up to the next instruction boundary
+	// past it, so cuttingIdx may exceed len(hookCode) (bounded by 12+15-1 = 26 on
+	// amd64, one branch width plus at most one maximal x86 instruction). Both the
+	// slice read below and the trampoline write must still fit, so pin the two
+	// invariants rather than assume them: targetCodeBuf is bufSize (64) bytes, and
+	// a page is at least 4096 bytes, so neither can fire today -- this is here to
+	// fail loudly instead of corrupting memory if either bound ever changes.
+	tool.Assert(cuttingIdx <= bufSize, "cutting index %v exceeds the %v bytes read from the target", cuttingIdx, bufSize)
+	tool.Assert(cuttingIdx+len(inst.BranchTo(0)) <= len(proxyCode), "trampoline (%v code bytes + branch) does not fit in a %v byte page", cuttingIdx, len(proxyCode))
 	// save the original code before the cutting point
 	copy(proxyCode, targetCodeBuf[:cuttingIdx])
 	// construct the branch instruction, i.e. jump to the cutting point
