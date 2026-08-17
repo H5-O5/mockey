@@ -18,6 +18,7 @@ package inst
 
 import (
 	"reflect"
+	"runtime"
 	"unsafe"
 
 	"github.com/bytedance/mockey/internal/monkey/common"
@@ -59,7 +60,55 @@ func calcFnAddrRange(name string, fn func()) (uintptr, uintptr) {
 // (cmd/link/internal/amd64/l.go).
 const padByte = 0xcc
 
+// withinTargetFunc reports whether the byte at code[offset] still belongs to the
+// function that code starts at, i.e. whether overwriting it can only ever damage
+// the target itself and never a neighbour.
+//
+// It answers with pclntab, via the public runtime.FuncForPC. The lookup is a
+// binary search over the function address table, so *every* pc in
+// [entry_i, entry_{i+1}) maps to function i -- including the alignment padding
+// at the tail, which has no symbol of its own. That is precisely the question we
+// need answered: "is this address still inside my function's slot?", where the
+// slot is code plus its padding, and it is exactly the region the next function
+// does not occupy.
+//
+// ok=false means "cannot tell", not "no": code may not point into the text
+// segment at all (unit tests pass ordinary heap slices), and FuncForPC returns
+// nil for a pc outside every known function. Callers must treat !ok as "no new
+// information" and fall back to the padding rule, so that a failed lookup can
+// never turn a patch that used to work into a refusal.
+func withinTargetFunc(code []byte, offset int) (within bool, ok bool) {
+	if len(code) == 0 {
+		return false, false
+	}
+	// code is common.BytesOf(targetAddr, bufSize), so its first byte *is* the
+	// function entry the caller is about to patch.
+	entry := uintptr(unsafe.Pointer(&code[0]))
+	self := runtime.FuncForPC(entry)
+	if self == nil || self.Entry() != entry {
+		// Not a known function entry: either not text at all, or entry sits in
+		// the middle of one (hand-written assembly sublabels do that). Either way
+		// we have no trustworthy slot to compare against.
+		return false, false
+	}
+	at := runtime.FuncForPC(entry + uintptr(offset))
+	if at == nil {
+		// Past the last function of the text segment, so there is no neighbour
+		// this far out either -- but say "unknown" rather than guess.
+		return false, false
+	}
+	return at.Entry() == self.Entry(), true
+}
+
 func Disassemble(code []byte, required int, checkLen bool) int {
+	return disassemble(code, required, checkLen, withinTargetFunc)
+}
+
+// disassemble is Disassemble with the function-boundary oracle injected. The real
+// oracle needs code to point at a live function entry, which a test cannot
+// fabricate for a synthetic byte slice, so tests substitute their own to drive
+// both answers deterministically.
+func disassemble(code []byte, required int, checkLen bool, within func([]byte, int) (bool, bool)) int {
 	var pos int
 	var err error
 	var inst x86asm.Inst
@@ -69,12 +118,47 @@ func Disassemble(code []byte, required int, checkLen bool) int {
 		tool.Assert(err == nil, err)
 		tool.DebugPrintf("Disassemble: inst: %v\n", inst)
 		if inst.Op == x86asm.RET {
-			// The target's own code ends here, so it is shorter than the branch
-			// sequence we need to write. That is only fatal if the remaining bytes
-			// belong to the *next* function. On amd64 they do not: the linker aligns
-			// every function entry to 32 bytes and fills the gap with 0xCC, which is
-			// dead space no control flow ever enters. Overwriting it is harmless, so
-			// only refuse when the tail is not padding.
+			// A return, not necessarily *the* return: the target may well continue
+			// past it. Either way the branch sequence we must write is longer than
+			// what we have walked so far, so we have to keep going and decide what
+			// the bytes after this RET are.
+			//
+			// Overwriting them is fatal only if they belong to the *next* function.
+			// Everything up to the next function's entry is fair game, and that
+			// covers two different kinds of bytes:
+			//
+			//  1. Linker padding. The amd64 linker aligns each function entry and
+			//     fills the gap with 0xCC, dead space no control flow ever enters.
+			//
+			//  2. More of the target's own code, i.e. a second return path. This is
+			//     the common case for the tiny nil-guarded getters Go generates:
+			//         (*BaseResp).GetStatusCode, 11 code bytes
+			//           +0  48 85 c0  TEST RAX, RAX
+			//           +3  74 03     JE +3
+			//           +5  8b 00     MOV EAX, [RAX]
+			//           +7  c3        RET          <- first RET, ends at +8
+			//           +8  31 c0     XOR EAX, EAX <- nil branch, real code
+			//           +10 c3        RET
+			//           +11 cc ...    padding starts here
+			//     Clobbering +8..+10 is safe *because we are patching the entry*:
+			//     the first thing we write is an unconditional branch to the hook,
+			//     so the target's own instructions are unreachable, all of them.
+			//     Nothing can jump into the middle of the function either -- Go
+			//     emits no such edges across a function boundary, and the only
+			//     inbound edge that survives the patch is the trampoline's, which
+			//     lands on the boundary we return here. So a second return path is
+			//     no more live than the padding next to it.
+			//
+			// Hence the rule is not "stop at the first RET" but "stay inside the
+			// target's own slot". We accept a byte when either
+			//   (a) pclntab says the address is still in the target function
+			//       (authoritative, and it covers the padding too), or
+			//   (b) it decodes as the 0xCC pad, which no function starts with, so
+			//       it cannot be a neighbour's first instruction.
+			// (b) is kept as the fallback for when the lookup cannot answer, so a
+			// nil FuncForPC never downgrades a patch that used to succeed. Note
+			// 0xCC has to be tested at an *instruction boundary*: scanning raw
+			// bytes would misread the 0xCC in e.g. "75 cc" (JNE -52) as padding.
 			//
 			// Why we keep decoding instead of `return required` -- read this before
 			// "simplifying" it back:
@@ -105,19 +189,28 @@ func Disassemble(code []byte, required int, checkLen bool) int {
 			// at or past it, and return that boundary. The returned value is still
 			// >= required (never restoring/overwriting less than the branch sequence),
 			// it is just rounded up to the next boundary instead of cutting blindly.
-			//
-			// Note this changes nothing for the checkLen==true (Mock) path: there
-			// every skipped byte must be 0xCC padding, and INT3 is 1 byte long, so pos
-			// lands exactly on `required` anyway. Only the checkLen==false
-			// (MockUnsafe) path, which is allowed to run past real code, is fixed.
 			pos += inst.Len // step over the RET itself first -- otherwise the very
 			// first iteration would test the RET opcode 0xc3 against padByte and
 			// wrongly report "function is too short to patch", and would re-decode
 			// the same RET forever.
 			for pos < required {
-				tool.Assert(code[pos] == padByte || !checkLen, "function is too short to patch")
 				inst, err = x86asm.Decode(code[pos:], 64)
 				tool.Assert(err == nil, err)
+				if checkLen {
+					// Ask about the last byte this instruction occupies, not its
+					// first: an instruction that starts inside the target must also
+					// end inside it, or writing the branch would still reach into
+					// the neighbour.
+					end := pos + inst.Len
+					inside, known := within(code, end-1)
+					tool.Assert(inside || (!known && code[pos] == padByte),
+						// Keep the historical wording so existing reports and
+						// searches still match, but say what actually went wrong:
+						// the branch sequence would not fit without writing over
+						// whatever follows the target.
+						"function is too short to patch: writing %v bytes would run past the "+
+							"target function into the next one at offset %v", required, pos)
+				}
 				pos += inst.Len
 			}
 			// Bound check for the caller: pos < required <= len(hookCode) == 12 on
