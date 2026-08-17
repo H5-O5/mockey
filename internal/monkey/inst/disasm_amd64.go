@@ -75,10 +75,56 @@ func Disassemble(code []byte, required int, checkLen bool) int {
 			// every function entry to 32 bytes and fills the gap with 0xCC, which is
 			// dead space no control flow ever enters. Overwriting it is harmless, so
 			// only refuse when the tail is not padding.
-			for i := pos + inst.Len; i < required; i++ {
-				tool.Assert(code[i] == padByte || !checkLen, "function is too short to patch")
+			//
+			// Why we keep decoding instead of `return required` -- read this before
+			// "simplifying" it back:
+			//
+			// The value returned here is PatchValue's cuttingIdx, and it is used for
+			// three things at once (internal/monkey/patch.go):
+			//   1. the trampoline saves code[:cuttingIdx],
+			//   2. the trampoline ends with BranchTo(targetAddr+cuttingIdx),
+			//   3. Unpatch restores cuttingIdx bytes.
+			// (2) makes cuttingIdx a *jump target in the original instruction
+			// stream*, so it MUST sit on an instruction boundary; (1) means the
+			// saved prefix must end on one too, or the trampoline's last "instruction"
+			// is a truncated fragment. `required` is just the length of the branch
+			// sequence (12 bytes here) -- nothing makes it land on a boundary.
+			//
+			// The non-RET exit below returns `pos`, which is boundary-aligned by
+			// construction. The RET branch returning the raw `required` was the odd
+			// one out, and it is exactly the bug: for a frameless function with an
+			// early `return`, e.g.
+			//     @0 TEST(3) @3 JLE(2) @5 MOV(5) @10 RET(1) @11 IMUL(4) @15 ...
+			// the loop hits RET at pos=10 and returns 12 -- which is the *middle* of
+			// the 4-byte IMUL at [11,15). The trampoline then keeps only the orphan
+			// REX prefix 0x48 of that IMUL and jumps back into its middle, so the CPU
+			// executes a garbage instruction stream. Depending on how those bytes
+			// happen to decode you get a SIGSEGV or, worse, a silently wrong result.
+			//
+			// So instead of trusting `required`, walk whole instructions until we are
+			// at or past it, and return that boundary. The returned value is still
+			// >= required (never restoring/overwriting less than the branch sequence),
+			// it is just rounded up to the next boundary instead of cutting blindly.
+			//
+			// Note this changes nothing for the checkLen==true (Mock) path: there
+			// every skipped byte must be 0xCC padding, and INT3 is 1 byte long, so pos
+			// lands exactly on `required` anyway. Only the checkLen==false
+			// (MockUnsafe) path, which is allowed to run past real code, is fixed.
+			pos += inst.Len // step over the RET itself first -- otherwise the very
+			// first iteration would test the RET opcode 0xc3 against padByte and
+			// wrongly report "function is too short to patch", and would re-decode
+			// the same RET forever.
+			for pos < required {
+				tool.Assert(code[pos] == padByte || !checkLen, "function is too short to patch")
+				inst, err = x86asm.Decode(code[pos:], 64)
+				tool.Assert(err == nil, err)
+				pos += inst.Len
 			}
-			return required
+			// Bound check for the caller: pos < required <= len(hookCode) == 12 on
+			// entry to the last iteration, and an x86 instruction is at most 15 bytes,
+			// so pos <= 26 here -- well inside the 64-byte targetCodeBuf and nowhere
+			// near the page the trampoline is written into.
+			return pos
 		}
 		pos += inst.Len
 	}
