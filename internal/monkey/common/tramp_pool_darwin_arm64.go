@@ -71,7 +71,7 @@ func AllocTrampoline(target uintptr, reach uintptr) []byte {
 	}
 
 	// otherwise map a fresh near page
-	page := AllocatePageNear(target, reach)
+	page := allocatePageWithin(target, reach)
 	if page == nil {
 		return nil
 	}

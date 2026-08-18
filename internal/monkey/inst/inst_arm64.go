@@ -35,6 +35,14 @@ func BranchInto(to uintptr) (res []byte) {
 	return
 }
 
+func ShortBranchSize() int {
+	return 0
+}
+
+func BranchIntoShort(_, _ uintptr) ([]byte, bool) {
+	return nil, false
+}
+
 const x26 uint32 = 0b11010
 
 // x26MOV moves the 64bit value to x26 register, using the following four instructions:

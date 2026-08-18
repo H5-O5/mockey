@@ -68,10 +68,17 @@ int alloc_in_range(uint64_t target, uint64_t lo, uint64_t hi, uint64_t size, uin
 */
 import "C"
 
-// AllocatePageNear allocates one page whose address is within `reach` bytes of
-// target, so a short PC-relative branch from target can reach it.
+// allocatePageWithin allocates one page whose address is within `reach` bytes
+// of target, so a short PC-relative branch from target can reach it.
 // Returns nil when no free page exists in that window.
-func AllocatePageNear(target uintptr, reach uintptr) []byte {
+//
+// This is deliberately distinct from the exported AllocatePageNear in page.go,
+// which serves the amd64 E9 path: that one takes no reach because rel32 fixes
+// the window at +/-2GB and it reports an error, whereas this one is the
+// darwin/arm64 mach allocator for the +/-128MB B range and reports nil. They
+// used to share a name, which does not compile on darwin/arm64 where both are
+// built. Unexported because the only caller is the trampoline pool next door.
+func allocatePageWithin(target uintptr, reach uintptr) []byte {
 	lo := uintptr(0)
 	if target > reach {
 		lo = target - reach

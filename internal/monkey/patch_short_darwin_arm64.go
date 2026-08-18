@@ -93,5 +93,5 @@ func PatchValueShort(target, hook, proxy reflect.Value, unsafe bool) *Patch {
 	// 4. overwrite the entry
 	mem.WriteWithSTW(targetAddr, stub)
 
-	return &Patch{base: targetAddr, code: proxyCode, size: cuttingIdx, orig: orig}
+	return &Patch{base: targetAddr, code: proxyCode, original: orig}
 }
