@@ -28,14 +28,18 @@ import (
 
 // Patch is a context that holds the address and original codes of the patched function.
 type Patch struct {
-	size int
 	code []byte
-	base uintptr
-	// orig holds the exact bytes that were at the entry before patching.
-	// The default path can restore from code[:size] because it copies the
-	// original instructions verbatim; the short-patch path relocates them,
-	// so it must remember the originals separately.
-	orig []byte
+	// original holds the exact bytes that were at the entry before patching.
+	//
+	// The legacy path could restore from code[:size] because it copies the
+	// original instructions into the trampoline verbatim. Neither short path
+	// can: the arm64 near-trampoline path and the amd64 E9 path both *relocate*
+	// the displaced instructions before storing them, so the trampoline copy is
+	// no longer byte-identical to what was at the entry. Recording the originals
+	// unconditionally makes Unpatch correct on every path and removes the need
+	// for a separate size field.
+	original []byte
+	base     uintptr
 }
 
 // Base returns the address of the patched function.
@@ -45,11 +49,7 @@ func (p *Patch) Base() uintptr {
 
 // Unpatch restores the patched function to the original function.
 func (p *Patch) Unpatch() {
-	restore := p.code[:p.size]
-	if p.orig != nil {
-		restore = p.orig
-	}
-	mem.WriteWithSTW(p.base, restore)
+	mem.WriteWithSTW(p.base, p.original)
 	common.ReleasePage(p.code)
 }
 
@@ -76,13 +76,53 @@ func PatchValue(target, hook, proxy reflect.Value, unsafe bool) *Patch {
 	// The first few bytes of the target function code
 	const bufSize = 64
 	targetCodeBuf := common.BytesOf(targetAddr, bufSize)
-	// construct the branch instruction, i.e. jump to the hook function
-	hookCode := inst.BranchInto(common.PtrAt(hook))
-	// construct the proxy code
-	proxyCode := common.AllocatePage()
-	tool.DebugPrintf("PatchValue: target addr(0x%x), proxy addr(%p), hook code len(%v)\n", targetAddr, &proxyCode[0], len(hookCode))
-	// search the cutting point of the target code, i.e. the minimum length of full instructions that is longer than the hookCode
-	cuttingIdx := inst.Disassemble(targetCodeBuf, len(hookCode), !unsafe)
+	hookAddr := common.PtrAt(hook)
+	hookCode := inst.BranchInto(hookAddr)
+	var cuttingIdx int
+	var proxyCode []byte
+	var proxyPrefix []byte
+
+	if unsafe || inst.ShortBranchSize() == 0 {
+		// Keep MockUnsafe and non-amd64 architectures on the legacy path.
+		cuttingIdx = inst.Disassemble(targetCodeBuf, len(hookCode), !unsafe)
+		proxyCode = common.AllocatePage()
+		proxyPrefix = targetCodeBuf[:cuttingIdx]
+	} else if idx, ok := inst.TryDisassemble(targetCodeBuf, len(hookCode), true); ok && !inst.HasPCRelative(targetCodeBuf[:idx]) {
+		// Preserve the existing 12-byte entry sequence when its trampoline prefix
+		// is position independent.
+		cuttingIdx = idx
+		proxyCode = common.AllocatePage()
+		proxyPrefix = targetCodeBuf[:cuttingIdx]
+	} else {
+		// A five-byte E9 reaches a nearby relay. The relay restores the function
+		// value pointer in RDX before entering the reflect-generated hook.
+		var ok bool
+		cuttingIdx, ok = inst.TryDisassemble(targetCodeBuf, inst.ShortBranchSize(), true)
+		tool.Assert(ok, "function is too short to patch")
+
+		var err error
+		proxyCode, err = common.AllocatePageNear(targetAddr)
+		tool.Assert(err == nil, "allocate near trampoline failed: %v", err)
+		proxyAddr := common.PtrOf(proxyCode)
+		proxyPrefix, err = inst.Relocate(targetCodeBuf[:cuttingIdx], targetAddr, proxyAddr)
+		if err != nil {
+			common.ReleasePage(proxyCode)
+			tool.Assert(false, "relocate trampoline failed: %v", err)
+		}
+
+		branchBack := inst.BranchTo(targetAddr + uintptr(cuttingIdx))
+		relayOffset := align(len(proxyPrefix)+len(branchBack), 16)
+		relayCode := inst.BranchInto(hookAddr)
+		tool.Assert(relayOffset+len(relayCode) <= len(proxyCode), "relay does not fit in proxy page")
+		copy(proxyCode[relayOffset:], relayCode)
+		hookCode, ok = inst.BranchIntoShort(targetAddr, proxyAddr+uintptr(relayOffset))
+		if !ok {
+			common.ReleasePage(proxyCode)
+			tool.Assert(false, "near trampoline is outside rel32 range")
+		}
+	}
+
+	original := append([]byte(nil), targetCodeBuf[:cuttingIdx]...)
 	// cuttingIdx is no longer guaranteed to equal len(hookCode): when the target
 	// ends in an early RET, Disassemble rounds up to the next instruction boundary
 	// past it, so cuttingIdx may exceed len(hookCode) (bounded by 12+15-1 = 26 on
@@ -92,17 +132,21 @@ func PatchValue(target, hook, proxy reflect.Value, unsafe bool) *Patch {
 	// a page is at least 4096 bytes, so neither can fire today -- this is here to
 	// fail loudly instead of corrupting memory if either bound ever changes.
 	tool.Assert(cuttingIdx <= bufSize, "cutting index %v exceeds the %v bytes read from the target", cuttingIdx, bufSize)
-	tool.Assert(cuttingIdx+len(inst.BranchTo(0)) <= len(proxyCode), "trampoline (%v code bytes + branch) does not fit in a %v byte page", cuttingIdx, len(proxyCode))
+	tool.Assert(len(proxyPrefix)+len(inst.BranchTo(0)) <= len(proxyCode), "trampoline (%v code bytes + branch) does not fit in a %v byte page", len(proxyPrefix), len(proxyCode))
 	// save the original code before the cutting point
-	copy(proxyCode, targetCodeBuf[:cuttingIdx])
+	copy(proxyCode, proxyPrefix)
 	// construct the branch instruction, i.e. jump to the cutting point
-	copy(proxyCode[cuttingIdx:], inst.BranchTo(targetAddr+uintptr(cuttingIdx)))
+	copy(proxyCode[len(proxyPrefix):], inst.BranchTo(targetAddr+uintptr(cuttingIdx)))
 	// inject the proxy code to the proxy function
 	fn.InjectInto(proxy, proxyCode)
 	// replace target function codes before the cutting point
 	mem.WriteWithSTW(targetAddr, hookCode)
 
-	return &Patch{base: targetAddr, code: proxyCode, size: cuttingIdx}
+	return &Patch{base: targetAddr, code: proxyCode, original: original}
+}
+
+func align(value, alignment int) int {
+	return (value + alignment - 1) &^ (alignment - 1)
 }
 
 func PatchFunc(fn, hook, proxy interface{}, unsafe bool) *Patch {
