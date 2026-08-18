@@ -16,26 +16,20 @@
 
 package inst
 
-// TryDisassemble reports whether Disassemble can find a cutting point, without
-// panicking when it cannot.
+// errFunctionTooShort is the refusal Disassemble has always panicked with when
+// a target ends before the branch sequence fits and the tail is not padding.
+// Kept as a constant so the panicking and error-returning paths cannot drift.
+const errFunctionTooShort = "function is too short to patch"
+
+// TryDisassemble finds the cutting point, reporting ok=false instead of
+// panicking when there is no usable one.
 //
-// Disassemble rejects by panicking, and it has more than one reason to do so:
-// "function is too short to patch" when the tail is not 0xCC padding, and
-// "unrecognized instruction" (from x86asm.Decode) when the window starts or
-// ends in the middle of something it cannot decode. Every one of those means
-// the same thing to a caller that is only probing -- "this cutting point is not
-// usable" -- so all of them must turn into ok=false rather than escaping.
-//
-// Recovering only the too-short case is a real bug: the short-jump path probes
-// a 5-byte window, which lands mid-instruction far more often than the 12-byte
-// one, so "unrecognized instruction" escaped and crashed tests that the legacy
-// path had rejected cleanly. Probing must never be able to fail louder than the
-// path it is probing for.
-func TryDisassemble(code []byte, required int, checkLen bool) (pos int, ok bool) {
-	defer func() {
-		if err := recover(); err != nil {
-			pos, ok = 0, false
-		}
-	}()
-	return Disassemble(code, required, checkLen), true
+// It shares its implementation with Disassemble: both call disassemble, which
+// returns a refusal as an error. Probing therefore cannot miss a refusal reason
+// that gets added later, and -- unlike catching the panic -- a genuine bug in
+// the disassembler is not silently reported as "not patchable", because only an
+// explicitly returned error counts as a refusal here.
+func TryDisassemble(code []byte, required int, checkLen bool) (int, bool) {
+	pos, err := disassemble(code, required, checkLen)
+	return pos, err == nil
 }
