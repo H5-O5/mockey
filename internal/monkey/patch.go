@@ -70,33 +70,20 @@ func PatchValue(target, hook, proxy reflect.Value, unsafe, generic bool) *Patch 
 		cuttingIdx = idx
 		proxyCode = common.AllocatePage()
 		proxyPrefix = targetCodeBuf[:cuttingIdx]
-	} else {
+	} else if shortCode, shortIdx, shortPrefix, shortPage, ok := tryShortBranch(targetAddr, targetCodeBuf, hookAddr); ok {
 		// A five-byte E9 reaches a nearby relay. The relay restores the function
 		// value pointer in RDX before entering the reflect-generated hook.
-		var ok bool
-		cuttingIdx, ok = inst.TryDisassemble(targetCodeBuf, inst.ShortBranchSize(), true)
-		tool.Assert(ok, "function is too short to patch")
-
-		var err error
-		proxyCode, err = common.AllocatePageNear(targetAddr)
-		tool.Assert(err == nil, "allocate near trampoline failed: %v", err)
-		proxyAddr := common.PtrOf(proxyCode)
-		proxyPrefix, err = inst.Relocate(targetCodeBuf[:cuttingIdx], targetAddr, proxyAddr)
-		if err != nil {
-			common.ReleasePage(proxyCode)
-			tool.Assert(false, "relocate trampoline failed: %v", err)
-		}
-
-		branchBack := inst.BranchTo(targetAddr + uintptr(cuttingIdx))
-		relayOffset := align(len(proxyPrefix)+len(branchBack), 16)
-		relayCode := inst.BranchInto(hookAddr)
-		tool.Assert(relayOffset+len(relayCode) <= len(proxyCode), "relay does not fit in proxy page")
-		copy(proxyCode[relayOffset:], relayCode)
-		hookCode, ok = inst.BranchIntoShort(targetAddr, proxyAddr+uintptr(relayOffset))
-		if !ok {
-			common.ReleasePage(proxyCode)
-			tool.Assert(false, "near trampoline is outside rel32 range")
-		}
+		hookCode, cuttingIdx, proxyPrefix, proxyCode = shortCode, shortIdx, shortPrefix, shortPage
+	} else {
+		// The short path is unavailable (target too short for a five-byte cut, no
+		// page within rel32 range, or a prefix we cannot relocate). Fall back to
+		// the legacy 12-byte path so that anything patchable before this change
+		// stays patchable: this path may only ever add capability, never remove
+		// it. If the legacy path cannot handle it either, Disassemble rejects
+		// loudly exactly as it did on the baseline.
+		cuttingIdx = inst.Disassemble(targetCodeBuf, len(hookCode), true)
+		proxyCode = common.AllocatePage()
+		proxyPrefix = targetCodeBuf[:cuttingIdx]
 	}
 
 	original := append([]byte(nil), targetCodeBuf[:cuttingIdx]...)
@@ -127,6 +114,49 @@ func PatchValue(target, hook, proxy reflect.Value, unsafe, generic bool) *Patch 
 
 func align(value, alignment int) int {
 	return (value + alignment - 1) &^ (alignment - 1)
+}
+
+// tryShortBranch builds the five-byte E9 entry sequence plus its near relay
+// page. It reports ok=false instead of panicking whenever the short path is
+// unavailable, so the caller can fall back to the legacy 12-byte path: this
+// feature may only ever add patchable functions, never take one away. Any page
+// allocated on a failing path is released before returning.
+func tryShortBranch(targetAddr uintptr, targetCodeBuf []byte, hookAddr uintptr) (hookCode []byte, cuttingIdx int, proxyPrefix, proxyCode []byte, ok bool) {
+	cuttingIdx, ok = inst.TryDisassemble(targetCodeBuf, inst.ShortBranchSize(), true)
+	if !ok {
+		return nil, 0, nil, nil, false
+	}
+
+	proxyCode, err := common.AllocatePageNear(targetAddr)
+	if err != nil {
+		tool.DebugPrintf("tryShortBranch: allocate near trampoline failed: %v\n", err)
+		return nil, 0, nil, nil, false
+	}
+	proxyAddr := common.PtrOf(proxyCode)
+	proxyPrefix, err = inst.Relocate(targetCodeBuf[:cuttingIdx], targetAddr, proxyAddr)
+	if err != nil {
+		common.ReleasePage(proxyCode)
+		tool.DebugPrintf("tryShortBranch: relocate trampoline failed: %v\n", err)
+		return nil, 0, nil, nil, false
+	}
+
+	branchBack := inst.BranchTo(targetAddr + uintptr(cuttingIdx))
+	relayOffset := align(len(proxyPrefix)+len(branchBack), 16)
+	relayCode := inst.BranchInto(hookAddr)
+	if relayOffset+len(relayCode) > len(proxyCode) {
+		common.ReleasePage(proxyCode)
+		tool.DebugPrintf("tryShortBranch: relay does not fit in proxy page\n")
+		return nil, 0, nil, nil, false
+	}
+	copy(proxyCode[relayOffset:], relayCode)
+
+	hookCode, ok = inst.BranchIntoShort(targetAddr, proxyAddr+uintptr(relayOffset))
+	if !ok {
+		common.ReleasePage(proxyCode)
+		tool.DebugPrintf("tryShortBranch: near trampoline is outside rel32 range\n")
+		return nil, 0, nil, nil, false
+	}
+	return hookCode, cuttingIdx, proxyPrefix, proxyCode, true
 }
 
 func PatchFunc(fn, hook, proxy interface{}, unsafe bool) *Patch {
