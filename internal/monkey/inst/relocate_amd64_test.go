@@ -50,6 +50,29 @@ func TestRelocate(t *testing.T) {
 		}
 	})
 
+	t.Run("prefixed short conditional branch", func(t *testing.T) {
+		oldAddr := uintptr(0x100000)
+		newAddr := uintptr(0x200000)
+		// CS is a branch-prediction prefix in 64-bit mode. It remains part of
+		// the encoding when JE rel8 expands to JE rel32.
+		code := []byte{0x2e, 0x74, 0x00}
+		relocated, err := Relocate(code, oldAddr, newAddr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []byte{0x2e, 0x0f, 0x84, 0xfc, 0xff, 0xef, 0xff}
+		if string(relocated) != string(want) {
+			t.Fatalf("relocated = % x, want % x", relocated, want)
+		}
+		jump, err := x86asm.Decode(relocated, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := branchTarget(t, newAddr, jump); got != oldAddr+3 {
+			t.Fatalf("relocated jump target = 0x%x, want 0x%x", got, oldAddr+3)
+		}
+	})
+
 	t.Run("RIP relative memory", func(t *testing.T) {
 		oldAddr := uintptr(0x300000)
 		newAddr := uintptr(0x380000)
