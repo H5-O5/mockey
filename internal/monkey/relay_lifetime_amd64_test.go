@@ -17,6 +17,7 @@
 package monkey
 
 import (
+	"reflect"
 	"syscall"
 	"testing"
 
@@ -70,6 +71,7 @@ func TestShortBranchRelayStaysMappedAfterUnpatch(t *testing.T) {
 	if !p.shortBranch {
 		t.Skip("target was not patched via the short branch; nothing to pin here")
 	}
+	hook := p.hook
 	relay := common.PtrOf(p.code) + 0x20
 	if !pageIsMapped(relay) {
 		t.Fatal("relay page is not mapped while patched")
@@ -80,6 +82,12 @@ func TestShortBranchRelayStaysMappedAfterUnpatch(t *testing.T) {
 	if !pageIsMapped(relay) {
 		t.Fatal("relay page was unmapped by Unpatch; an in-flight caller would " +
 			"fault on it unrecoverably")
+	}
+	retiredRelays.Lock()
+	retired := retiredRelays.pages[len(retiredRelays.pages)-1]
+	retiredRelays.Unlock()
+	if reflect.ValueOf(retired.hook).Pointer() != reflect.ValueOf(hook).Pointer() {
+		t.Fatal("retired relay lost the hook function value embedded as a raw address")
 	}
 	if got := relayLiveTarget(nil); got != relayLiveGlobal {
 		t.Fatalf("target not restored: got %d, want %d", got, relayLiveGlobal)

@@ -32,16 +32,28 @@ type Patch struct {
 	code     []byte
 	original []byte
 	base     uintptr
+	// hook keeps the function value whose address is embedded in a short relay
+	// reachable after Unpatch. See retiredRelays.
+	hook interface{}
 	// shortBranch records that the target's entry is a five-byte E9 into a relay
 	// inside code, which changes who may free that page. See Unpatch.
 	shortBranch bool
 }
 
+type retiredRelay struct {
+	code []byte
+	// hook is deliberately a Go reference, rather than the raw address in code.
+	// The garbage collector does not scan executable bytes for pointers.
+	hook interface{}
+}
+
 // retiredRelays keeps relay pages of short-branch patches mapped for the rest
-// of the process. See Unpatch for why they cannot be unmapped.
+// of the process. It also retains each relay's hook function value: a goroutine
+// which already executed E9 before Unpatch can still load that value from the
+// relay after the caller releases its Mocker.
 var retiredRelays struct {
 	sync.Mutex
-	pages [][]byte
+	pages []retiredRelay
 }
 
 // Unpatch restores the patched function to the original function.
@@ -62,7 +74,7 @@ func (p *Patch) Unpatch() {
 		// retire the page instead. It stays mapped and is never reused, costing one
 		// 4 KiB page per short-branch patch for the life of the process.
 		retiredRelays.Lock()
-		retiredRelays.pages = append(retiredRelays.pages, p.code)
+		retiredRelays.pages = append(retiredRelays.pages, retiredRelay{code: p.code, hook: p.hook})
 		retiredRelays.Unlock()
 		return
 	}
@@ -141,7 +153,7 @@ func PatchValue(target, hook, proxy reflect.Value, unsafe, generic bool) *Patch 
 	// replace target function codes before the cutting point
 	mem.WriteWithSTW(targetAddr, hookCode)
 
-	return &Patch{base: targetAddr, code: proxyCode, original: original, shortBranch: usedShortBranch}
+	return &Patch{base: targetAddr, code: proxyCode, original: original, hook: hook.Interface(), shortBranch: usedShortBranch}
 }
 
 func align(value, alignment int) int {
