@@ -33,3 +33,12 @@ func TryDisassemble(code []byte, required int, checkLen bool) (int, bool) {
 	pos, err := disassemble(code, required, checkLen)
 	return pos, err == nil
 }
+
+// DisassembleErr is TryDisassemble that hands back the refusal itself, for
+// callers that want to report why rather than merely whether. It exists so that
+// a caller can add context (which function, what bytes) to the reason without
+// having to restate the reason -- and therefore without being able to drift
+// from it.
+func DisassembleErr(code []byte, required int, checkLen bool) (int, error) {
+	return disassemble(code, required, checkLen)
+}
