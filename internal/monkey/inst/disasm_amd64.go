@@ -17,6 +17,7 @@
 package inst
 
 import (
+	"errors"
 	"reflect"
 	"unsafe"
 
@@ -59,14 +60,35 @@ func calcFnAddrRange(name string, fn func()) (uintptr, uintptr) {
 // (cmd/link/internal/amd64/l.go).
 const padByte = 0xcc
 
+// Disassemble finds the cutting point, panicking when it cannot. This is the
+// long-standing entry point and its panic behaviour -- both when it fires and
+// what it carries -- is unchanged.
 func Disassemble(code []byte, required int, checkLen bool) int {
+	pos, err := disassemble(code, required, checkLen)
+	tool.Assert(err == nil, err)
+	return pos
+}
+
+// disassemble is the actual implementation. It reports refusals as an error
+// instead of panicking, so callers that are merely probing a cutting point can
+// ask without arranging to catch a panic.
+//
+// Returning an error rather than recovering in the caller matters for two
+// reasons. Refusal reasons can be added here later and no probing caller can
+// silently miss one, because there is nothing to keep in sync. And a genuine
+// bug in this function -- a slice overrun, a nil deref -- still panics and
+// still escapes, instead of being quietly reported as "this function is not
+// patchable"; only the errors returned below are treated as refusals.
+func disassemble(code []byte, required int, checkLen bool) (int, error) {
 	var pos int
 	var err error
 	var inst x86asm.Inst
 
 	for pos < required {
 		inst, err = x86asm.Decode(code[pos:], 64)
-		tool.Assert(err == nil, err)
+		if err != nil {
+			return 0, err
+		}
 		tool.DebugPrintf("Disassemble: inst: %v\n", inst)
 		if inst.Op == x86asm.RET {
 			// The target's own code ends here, so it is shorter than the branch
@@ -115,20 +137,24 @@ func Disassemble(code []byte, required int, checkLen bool) int {
 			// wrongly report "function is too short to patch", and would re-decode
 			// the same RET forever.
 			for pos < required {
-				tool.Assert(code[pos] == padByte || !checkLen, "function is too short to patch")
+				if !(code[pos] == padByte || !checkLen) {
+					return 0, errors.New(errFunctionTooShort)
+				}
 				inst, err = x86asm.Decode(code[pos:], 64)
-				tool.Assert(err == nil, err)
+				if err != nil {
+					return 0, err
+				}
 				pos += inst.Len
 			}
 			// Bound check for the caller: pos < required <= len(hookCode) == 12 on
 			// entry to the last iteration, and an x86 instruction is at most 15 bytes,
 			// so pos <= 26 here -- well inside the 64-byte targetCodeBuf and nowhere
 			// near the page the trampoline is written into.
-			return pos
+			return pos, nil
 		}
 		pos += inst.Len
 	}
-	return pos
+	return pos, nil
 }
 
 func GetGenericJumpAddr(addr uintptr, maxScan uint64) uintptr {
