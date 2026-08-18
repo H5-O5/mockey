@@ -89,19 +89,27 @@ func Relocate(code []byte, oldAddr, newAddr uintptr) ([]byte, error) {
 		}
 
 		if item.inst.PCRel == 1 && isControl {
-			switch oldBytes[0] {
+			opcodeOffset := item.inst.PCRelOff - 1
+			if opcodeOffset < 0 {
+				return nil, fmt.Errorf("unsupported rel8 instruction %s", item.inst.Op)
+			}
+			switch oldBytes[opcodeOffset] {
 			case 0xeb:
+				if opcodeOffset != 0 {
+					return nil, fmt.Errorf("unsupported prefixed short jump %s", item.inst.Op)
+				}
 				newBytes[0] = 0xe9
 				if !writeSigned(newBytes[1:], 4, newDisplacement) {
 					return nil, fmt.Errorf("relocated short jump is outside rel32 range")
 				}
 			default:
-				if len(oldBytes) != 2 || oldBytes[0] < 0x70 || oldBytes[0] > 0x7f {
+				if oldBytes[opcodeOffset] < 0x70 || oldBytes[opcodeOffset] > 0x7f {
 					return nil, fmt.Errorf("unsupported rel8 instruction %s", item.inst.Op)
 				}
-				newBytes[0] = 0x0f
-				newBytes[1] = 0x80 | (oldBytes[0] & 0x0f)
-				if !writeSigned(newBytes[2:], 4, newDisplacement) {
+				copy(newBytes, oldBytes[:opcodeOffset])
+				newBytes[opcodeOffset] = 0x0f
+				newBytes[opcodeOffset+1] = 0x80 | (oldBytes[opcodeOffset] & 0x0f)
+				if !writeSigned(newBytes[opcodeOffset+2:], 4, newDisplacement) {
 					return nil, fmt.Errorf("relocated short conditional jump is outside rel32 range")
 				}
 			}
@@ -127,11 +135,15 @@ func decodeForRelocation(code []byte) ([]decodedInst, int, error) {
 		newLen := decoded.Len
 		if decoded.PCRel == 1 && hasRelativeControl(decoded) {
 			encoded := code[oldOffset : oldOffset+decoded.Len]
+			opcodeOffset := decoded.PCRelOff - 1
+			if opcodeOffset < 0 {
+				return nil, 0, fmt.Errorf("unsupported rel8 instruction %s", decoded.Op)
+			}
 			switch {
-			case len(encoded) == 2 && encoded[0] == 0xeb:
+			case opcodeOffset == 0 && encoded[opcodeOffset] == 0xeb:
 				newLen = 5
-			case len(encoded) == 2 && encoded[0] >= 0x70 && encoded[0] <= 0x7f:
-				newLen = 6
+			case encoded[opcodeOffset] >= 0x70 && encoded[opcodeOffset] <= 0x7f:
+				newLen = decoded.Len + 4
 			default:
 				return nil, 0, fmt.Errorf("unsupported rel8 instruction %s", decoded.Op)
 			}
