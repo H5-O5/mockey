@@ -16,7 +16,12 @@
 
 package inst
 
-import "unsafe"
+import (
+	"encoding/binary"
+	"unsafe"
+)
+
+const shortBranchSize = 5
 
 func BranchTo(to uintptr) (res []byte) {
 	res = append(res, rdxMOV(to)...)         // MOVABS RDX, to
@@ -28,6 +33,21 @@ func BranchInto(to uintptr) (res []byte) {
 	res = append(res, rdxMOV(to)...)         // MOVABS RDX, to
 	res = append(res, []byte{0xff, 0x22}...) // JMP [RDX]
 	return
+}
+
+func ShortBranchSize() int {
+	return shortBranchSize
+}
+
+func BranchIntoShort(from, to uintptr) ([]byte, bool) {
+	delta, ok := subtractAddress(to, from+shortBranchSize)
+	if !ok || delta < -1<<31 || delta > 1<<31-1 {
+		return nil, false
+	}
+	result := make([]byte, shortBranchSize)
+	result[0] = 0xe9
+	binary.LittleEndian.PutUint32(result[1:], uint32(int32(delta)))
+	return result, true
 }
 
 // rdxMOV moves the 64bit value to rdx register, using the following instruction:
