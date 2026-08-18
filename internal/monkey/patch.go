@@ -18,6 +18,7 @@ package monkey
 
 import (
 	"reflect"
+	"sync"
 
 	"github.com/bytedance/mockey/internal/monkey/common"
 	"github.com/bytedance/mockey/internal/monkey/fn"
@@ -31,11 +32,40 @@ type Patch struct {
 	code     []byte
 	original []byte
 	base     uintptr
+	// shortBranch records that the target's entry is a five-byte E9 into a relay
+	// inside code, which changes who may free that page. See Unpatch.
+	shortBranch bool
+}
+
+// retiredRelays keeps relay pages of short-branch patches mapped for the rest
+// of the process. See Unpatch for why they cannot be unmapped.
+var retiredRelays struct {
+	sync.Mutex
+	pages [][]byte
 }
 
 // Unpatch restores the patched function to the original function.
 func (p *Patch) Unpatch() {
 	mem.WriteWithSTW(p.base, p.original)
+	if p.shortBranch {
+		// Do not unmap. On the legacy path the entry is MOVABS RDX, hook; JMP [RDX],
+		// which goes straight to the hook, so this page is only ever reached through
+		// the proxy the caller holds. The short branch changes that: the entry is a
+		// five-byte E9 into a relay that lives in this very page, so EVERY call to
+		// the target runs through it. A goroutine that has already executed the E9
+		// when Unpatch runs is left executing an unmapped page, which the runtime
+		// reports as an unrecoverable "unexpected fault address <page>+0x20".
+		//
+		// Restoring the entry bytes above does not close the window: the jump has
+		// already happened. Nothing short of knowing that no thread is inside the
+		// relay would make freeing safe, and there is no cheap way to know that, so
+		// retire the page instead. It stays mapped and is never reused, costing one
+		// 4 KiB page per short-branch patch for the life of the process.
+		retiredRelays.Lock()
+		retiredRelays.pages = append(retiredRelays.pages, p.code)
+		retiredRelays.Unlock()
+		return
+	}
 	common.ReleasePage(p.code)
 }
 
@@ -58,6 +88,7 @@ func PatchValue(target, hook, proxy reflect.Value, unsafe, generic bool) *Patch 
 	var cuttingIdx int
 	var proxyCode []byte
 	var proxyPrefix []byte
+	var usedShortBranch bool
 
 	if unsafe || inst.ShortBranchSize() == 0 {
 		// Keep MockUnsafe and non-amd64 architectures on the legacy path.
@@ -74,6 +105,7 @@ func PatchValue(target, hook, proxy reflect.Value, unsafe, generic bool) *Patch 
 		// A five-byte E9 reaches a nearby relay. The relay restores the function
 		// value pointer in RDX before entering the reflect-generated hook.
 		hookCode, cuttingIdx, proxyPrefix, proxyCode = shortCode, shortIdx, shortPrefix, shortPage
+		usedShortBranch = true
 	} else {
 		// The short path is unavailable (target too short for a five-byte cut, no
 		// page within rel32 range, or a prefix we cannot relocate). Fall back to
@@ -109,7 +141,7 @@ func PatchValue(target, hook, proxy reflect.Value, unsafe, generic bool) *Patch 
 	// replace target function codes before the cutting point
 	mem.WriteWithSTW(targetAddr, hookCode)
 
-	return &Patch{base: targetAddr, code: proxyCode, original: original}
+	return &Patch{base: targetAddr, code: proxyCode, original: original, shortBranch: usedShortBranch}
 }
 
 func align(value, alignment int) int {
