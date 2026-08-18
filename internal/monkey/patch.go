@@ -18,6 +18,7 @@ package monkey
 
 import (
 	"reflect"
+	"runtime"
 	"sync"
 
 	"github.com/bytedance/mockey/internal/monkey/common"
@@ -104,7 +105,7 @@ func PatchValue(target, hook, proxy reflect.Value, unsafe, generic bool) *Patch 
 
 	if unsafe || inst.ShortBranchSize() == 0 {
 		// Keep MockUnsafe and non-amd64 architectures on the legacy path.
-		cuttingIdx = inst.Disassemble(targetCodeBuf, len(hookCode), !unsafe)
+		cuttingIdx = disassembleOrExplain(targetAddr, targetCodeBuf, len(hookCode), !unsafe)
 		proxyCode = common.AllocatePage()
 		proxyPrefix = targetCodeBuf[:cuttingIdx]
 	} else if idx, ok := inst.TryDisassemble(targetCodeBuf, len(hookCode), true); ok && !inst.HasPCRelative(targetCodeBuf[:idx]) {
@@ -125,7 +126,7 @@ func PatchValue(target, hook, proxy reflect.Value, unsafe, generic bool) *Patch 
 		// stays patchable: this path may only ever add capability, never remove
 		// it. If the legacy path cannot handle it either, Disassemble rejects
 		// loudly exactly as it did on the baseline.
-		cuttingIdx = inst.Disassemble(targetCodeBuf, len(hookCode), true)
+		cuttingIdx = disassembleOrExplain(targetAddr, targetCodeBuf, len(hookCode), true)
 		proxyCode = common.AllocatePage()
 		proxyPrefix = targetCodeBuf[:cuttingIdx]
 	}
@@ -150,7 +151,27 @@ func PatchValue(target, hook, proxy reflect.Value, unsafe, generic bool) *Patch 
 
 	tool.DebugPrintf("PatchValue: hook code len(%v), cuttingIdx(%v)\n", len(hookCode), cuttingIdx)
 
-	// replace target function codes before the cutting point
+	// Replace target function codes before the cutting point.
+	//
+	// Pad to the full cutting point rather than writing only the branch. The
+	// cutting point is rounded up to an instruction boundary, so it is often
+	// wider than the branch -- most visibly a five-byte E9 over a six-byte
+	// CMP/JBE prologue. Bytes inside the cut that we leave alone are the tail of
+	// an instruction whose head we just overwrote. Execution never reaches them,
+	// because the branch leaves first, so the patch itself works either way.
+	//
+	// The reason this is not cosmetic is that mockey reads its own patched code
+	// back: every subsequent PatchValue on the same function disassembles the
+	// live entry to find its cutting point. An orphan tail makes that entry an
+	// invalid instruction stream, and Disassemble rejects it with
+	// "unrecognized instruction" -- naming neither the address nor the real
+	// cause. That is reached whenever a mock is still live when the next one is
+	// built, i.e. any mock that is never unpatched, which is the normal shape of
+	// a Mock(...) at the top level of a test function.
+	//
+	// Unpatch always restored the whole cutting point, so it never contributed:
+	// the entry has to be decodable *while patched*, not only after.
+	hookCode = inst.PadEntry(hookCode, cuttingIdx)
 	mem.WriteWithSTW(targetAddr, hookCode)
 
 	return &Patch{base: targetAddr, code: proxyCode, original: original, hook: hook.Interface(), shortBranch: usedShortBranch}
@@ -158,6 +179,45 @@ func PatchValue(target, hook, proxy reflect.Value, unsafe, generic bool) *Patch 
 
 func align(value, alignment int) int {
 	return (value + alignment - 1) &^ (alignment - 1)
+}
+
+// diagnosticBytes is how much of the entry a refusal quotes. Sixteen covers any
+// single x86 instruction (max 15) plus a byte of context, which is enough to
+// tell a mangled entry from a genuinely unpatchable one at a glance.
+const diagnosticBytes = 16
+
+// disassembleOrExplain is inst.Disassemble with the target named in the failure.
+//
+// The bare refusals ("unrecognized instruction", "function is too short to
+// patch") say nothing about which function was refused or what was actually
+// read. That is a problem specific to this refusal: it is the one failure mode
+// that can be caused by a *previous* mock rather than by the target itself, so
+// the caller in the stack trace is frequently not the culprit. Without the
+// address there is nothing to correlate against, and diagnosing it means
+// bisecting the test order by hand.
+//
+// The address is printed both raw and resolved: raw is what the debug ledger
+// (MOCKEY_DEBUG=true) prints, so the two can be matched up directly, and the
+// symbol is what a reader actually recognises.
+func disassembleOrExplain(targetAddr uintptr, code []byte, required int, checkLen bool) int {
+	pos, err := inst.DisassembleErr(code, required, checkLen)
+	if err == nil {
+		return pos
+	}
+	name := "unknown function"
+	if f := runtime.FuncForPC(targetAddr); f != nil {
+		name = f.Name()
+	}
+	quoted := code
+	if len(quoted) > diagnosticBytes {
+		quoted = quoted[:diagnosticBytes]
+	}
+	tool.Assert(false, "%v: cannot patch %v at 0x%x (%v), entry reads % x. "+
+		"If those bytes begin with a branch (E9 or 48 BA ... FF 22), this function is "+
+		"already patched and was never unpatched: unpatch the earlier mock, or build "+
+		"it inside PatchConvey so it is unpatched for you.",
+		err, name, targetAddr, targetAddr, quoted)
+	return 0 // unreachable: Assert(false) always panics
 }
 
 // tryShortBranch builds the five-byte E9 entry sequence plus its near relay

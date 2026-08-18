@@ -44,6 +44,19 @@ func BranchIntoShort(_, _ uintptr) ([]byte, bool) {
 	return nil, false
 }
 
+// PadEntry is a no-op on arm64. Instructions are fixed at four bytes and the
+// cutting point is always a multiple of four, so an entry sequence can never
+// leave an orphan tail behind the way a five-byte x86 E9 can. See the amd64
+// version for the full argument.
+func PadEntry(code []byte, width int) []byte {
+	if len(code) >= width {
+		return code
+	}
+	padded := make([]byte, width)
+	copy(padded, code)
+	return padded
+}
+
 const x26 uint32 = 0b11010
 
 // x26MOV moves the 64bit value to x26 register, using the following four instructions:
