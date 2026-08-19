@@ -51,16 +51,20 @@ var nopBytes = [4]byte{0x1f, 0x20, 0x03, 0xd5}
 // PadEntry cannot currently pad anything on arm64, but it pads correctly when
 // it does.
 //
-// The reason it is unreachable is not that instructions are four bytes wide --
-// that alone would not stop a cutting point from exceeding the entry sequence.
-// It is that disassemble on this architecture returns `required` verbatim
-// without stepping through instructions, so cuttingIdx is always exactly
-// len(hookCode) and the guard below always takes the early return.
+// The reason it is unreachable is not that instructions are four bytes wide on
+// its own -- that alone would not stop a cutting point from exceeding the entry
+// sequence. It is the conjunction of two facts: disassemble here advances by a
+// fixed instLen of 4, and every entry sequence this file emits is a whole
+// number of instructions (BranchInto is 24 bytes, ShortBranchLen is 4). So the
+// loop's exit lands exactly on `required` and cuttingIdx never overshoots
+// len(hookCode).
 //
-// That is a property of the current arm64 disassembler, not of the
-// architecture, so it is worth not depending on. Should arm64 ever round its
-// cutting point up to an instruction boundary the way amd64 does, this fills
-// with NOPs like its amd64 counterpart instead of leaving zeroes behind.
+// Both are properties of the current implementation, not of the architecture,
+// so it is worth not depending on either. Should arm64 ever round its cutting
+// point up past a variable-width boundary the way amd64 does, or should an
+// entry sequence stop being instruction-aligned, this fills with NOPs like its
+// amd64 counterpart instead of leaving zeroes behind -- and zero is UDF #0, so
+// the tail would become a SIGILL the moment it stopped being unreachable.
 func PadEntry(code []byte, width int) []byte {
 	if len(code) >= width {
 		return code
