@@ -17,6 +17,7 @@
 package inst
 
 import (
+	"errors"
 	"reflect"
 	"unsafe"
 
@@ -52,9 +53,22 @@ func calcFnAddrRange(name string, fn func()) (uintptr, uintptr) {
 	return 0, 0
 }
 
+// Disassemble finds the cutting point, panicking when it cannot. Behaviour is
+// unchanged; it delegates to disassemble so that the panicking and probing
+// entry points share one implementation, as on amd64.
 func Disassemble(code []byte, required int, checkLen bool) int {
-	tool.Assert(len(code) > required, "function is too short to patch")
-	return required
+	pos, err := disassemble(code, required, checkLen)
+	tool.Assert(err == nil, err)
+	return pos
+}
+
+// disassemble reports a refusal as an error instead of panicking. See the amd64
+// version for why probing returns an error rather than recovering a panic.
+func disassemble(code []byte, required int, checkLen bool) (int, error) {
+	if len(code) <= required {
+		return 0, errors.New(errFunctionTooShort)
+	}
+	return required, nil
 }
 
 func GetGenericJumpAddr(addr uintptr, maxScan uint64) uintptr {
