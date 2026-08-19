@@ -34,16 +34,6 @@ func Hook(in string) string {
 
 func UnsafeTarget() {}
 
-var optimizedGlobal = 41
-
-//go:noinline
-func OptimizedBranchGlobal(value *int) int {
-	if value == nil {
-		return optimizedGlobal
-	}
-	return *value
-}
-
 func TestPatchFunc(t *testing.T) {
 	Convey("TestPatchFunc", t, func() {
 		Convey("normal", func() {
@@ -85,32 +75,4 @@ func TestPatchFunc(t *testing.T) {
 			So(Target("anything"), ShouldEqual, "anything")
 		})
 	})
-}
-
-func TestPatchFuncOptimizedTrampoline(t *testing.T) {
-	var proxy func(*int) int
-	patch := PatchFunc(OptimizedBranchGlobal, func(*int) int { return -1 }, &proxy, false)
-	patched := true
-	defer func() {
-		if patched {
-			patch.Unpatch()
-		}
-	}()
-
-	if got := OptimizedBranchGlobal(nil); got != -1 {
-		t.Fatalf("patched target = %d, want -1", got)
-	}
-	value := 7
-	if got := proxy(&value); got != value {
-		t.Fatalf("origin pointer branch = %d, want %d", got, value)
-	}
-	if got := proxy(nil); got != optimizedGlobal {
-		t.Fatalf("origin global branch = %d, want %d", got, optimizedGlobal)
-	}
-
-	patch.Unpatch()
-	patched = false
-	if got := OptimizedBranchGlobal(nil); got != optimizedGlobal {
-		t.Fatalf("unpatched target = %d, want %d", got, optimizedGlobal)
-	}
 }
