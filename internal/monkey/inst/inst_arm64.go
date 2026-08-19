@@ -43,16 +43,33 @@ func BranchIntoShort(_, _ uintptr) ([]byte, bool) {
 	return nil, false
 }
 
-// PadEntry is a no-op on arm64. Instructions are fixed at four bytes and the
-// cutting point is always a multiple of four, so an entry sequence can never
-// leave an orphan tail behind the way a five-byte x86 E9 can. See the amd64
-// version for the full argument.
+// nopBytes is the arm64 NOP encoding (little-endian 0xd503201f). Zero would be
+// UDF #0, so padding with it turns an unreachable tail into a SIGILL the moment
+// it stops being unreachable.
+var nopBytes = [4]byte{0x1f, 0x20, 0x03, 0xd5}
+
+// PadEntry cannot currently pad anything on arm64, but it pads correctly when
+// it does.
+//
+// The reason it is unreachable is not that instructions are four bytes wide --
+// that alone would not stop a cutting point from exceeding the entry sequence.
+// It is that disassemble on this architecture returns `required` verbatim
+// without stepping through instructions, so cuttingIdx is always exactly
+// len(hookCode) and the guard below always takes the early return.
+//
+// That is a property of the current arm64 disassembler, not of the
+// architecture, so it is worth not depending on. Should arm64 ever round its
+// cutting point up to an instruction boundary the way amd64 does, this fills
+// with NOPs like its amd64 counterpart instead of leaving zeroes behind.
 func PadEntry(code []byte, width int) []byte {
 	if len(code) >= width {
 		return code
 	}
 	padded := make([]byte, width)
 	copy(padded, code)
+	for i := len(code); i < width; i++ {
+		padded[i] = nopBytes[i%4]
+	}
 	return padded
 }
 
