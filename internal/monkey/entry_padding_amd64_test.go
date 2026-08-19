@@ -48,6 +48,39 @@ func orphanEntryTarget(a int, p *int) int {
 	return *p + a
 }
 
+// illegalOrphanTarget is orphanEntryTarget's sharper twin: same short-branch
+// shape, but its orphan byte does not decode.
+//
+// The distinction matters because it is the whole difference between a
+// regression test that fires and one that does not. orphanEntryTarget's cut
+// leaves 0x08 behind, and 0x08 happens to be a legal opcode (OR r/m8, r8), so
+// an unpadded entry there is still a decodable instruction stream and a later
+// Patch accepts it. The bug is present but invisible.
+//
+// Here the arithmetic chain in the taken branch pushes the Jcc displacement out
+// to 0x1e, which is not a legal opcode. An unpadded entry becomes exactly what
+// the wrapper failure was: an entry mockey can no longer read back, so the next
+// Patch on the same function dies in Disassemble with "unrecognized
+// instruction".
+//
+// The displacement is load-bearing and it is a property of the generated code,
+// not of the source. TestIllegalOrphanFixtureStillBites asserts it rather than
+// trusting it, so that a compiler change that moves the byte is reported as
+// such instead of silently retiring the test.
+//
+//go:noinline
+func illegalOrphanTarget(a int, p *int) int {
+	if a > 3 {
+		s := orphanGlobal
+		s = s*3 + orphanGlobal2*1
+		s = s*3 + orphanGlobal2*2
+		return s
+	}
+	return *p + a + orphanGlobal2
+}
+
+var orphanGlobal2 = 7
+
 //go:noinline
 func orphanEntryLegacyTarget(a, b, c int) int {
 	s := a*3 + b*5 + c*7
@@ -161,8 +194,74 @@ func TestRepatchWhileShortBranchIsLive(t *testing.T) {
 	third.Unpatch()
 }
 
-// The same invariant on the legacy path, which has the same rounding-up
-// behaviour and so the same way to leave an orphan tail.
+// TestIllegalOrphanFixtureStillBites guards the guard.
+//
+// TestRepatchOverIllegalOrphanEntry can only fail for the right reason while
+// illegalOrphanTarget's orphan byte stays undecodable. That byte is chosen by
+// the compiler, so a toolchain change can quietly turn the test below into one
+// that passes whether or not the fix is present -- which is precisely the
+// failure this file exists to prevent, and precisely what happened to the
+// original fixture.
+//
+// So assert the premise separately. If this fails, the fixture needs a new
+// shape; the padding itself may well be fine.
+func TestIllegalOrphanFixtureStillBites(t *testing.T) {
+	short := inst.ShortBranchSize()
+	entry := entryOf(illegalOrphanTarget, 64)
+
+	cuttingIdx, ok := inst.TryDisassemble(entry, short, true)
+	if !ok {
+		t.Fatalf("fixture no longer takes the short branch: entry = % x", entry[:16])
+	}
+	if cuttingIdx <= short {
+		t.Fatalf("fixture leaves no orphan: cut=%d short=%d, entry = % x", cuttingIdx, short, entry[:16])
+	}
+
+	// Rebuild the entry the way an unpadded PatchValue would have left it: the
+	// five-byte E9 written in, the rest of the cut left untouched.
+	unpadded := make([]byte, len(entry))
+	copy(unpadded, entry)
+	unpadded[0] = 0xe9
+	for i := 1; i < short; i++ {
+		unpadded[i] = 0x11
+	}
+	if decodable(unpadded, len(inst.BranchInto(0)), false) {
+		t.Fatalf("orphan byte 0x%02x still decodes: this fixture cannot detect the bug "+
+			"it was written for, entry = % x", entry[short], entry[:16])
+	}
+}
+
+// TestRepatchOverIllegalOrphanEntry is the end-to-end reproduction: it goes
+// through PatchValue, not through a hand-built byte array, and it fails when
+// the padding is removed.
+//
+// The sequence is the one the wrapper hit. A mock is left live -- the ordinary
+// shape of a Mock(...) at the top of a test function -- and the next mock on
+// the same function has to read the patched entry back to find its own cutting
+// point. Without padding that read hits the orphan and Disassemble refuses.
+func TestRepatchOverIllegalOrphanEntry(t *testing.T) {
+	var proxy func(int, *int) int
+	first := PatchFunc(illegalOrphanTarget, func(int, *int) int { return -1 }, &proxy, false)
+	defer first.Unpatch()
+	if !first.shortBranch {
+		t.Skip("target was not patched via the short branch; nothing to pin here")
+	}
+
+	zero := 0
+	if got := illegalOrphanTarget(0, &zero); got != -1 {
+		t.Fatalf("first patch is not effective: got %d, want -1", got)
+	}
+
+	// The live patch is deliberately left in place. Re-patch through
+	// MockUnsafe, which is the path the wrapper crash came in through.
+	var unsafeProxy func(int, *int) int
+	second := PatchFunc(illegalOrphanTarget, func(int, *int) int { return -2 }, &unsafeProxy, true)
+	if got := illegalOrphanTarget(0, &zero); got != -2 {
+		t.Fatalf("re-patch over a live patch is not effective: got %d, want -2", got)
+	}
+	second.Unpatch()
+}
+
 func TestLegacyPatchedEntryStaysDecodable(t *testing.T) {
 	var proxy func(int, int, int) int
 	p := PatchFunc(orphanEntryLegacyTarget, func(int, int, int) int { return -1 }, &proxy, false)
