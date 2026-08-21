@@ -113,6 +113,7 @@ func (n *NotImpl) Foo1(s string, i int) string {
 	return s + fmt.Sprint(i)
 }
 
+//go:noinline
 func CallFoo(i MyI, s string) string {
 	return i.Foo1(s)
 }

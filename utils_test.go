@@ -24,10 +24,14 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/bytedance/mockey/internal/tool"
 	"github.com/smartystreets/goconvey/convey"
 )
 
 func TestGetNestedMethod(t *testing.T) {
+	if !tool.IsGCFlagsSet() {
+		t.Skip("embedded method patch semantics require -gcflags='all=-N -l' on arm64")
+	}
 	convey.Convey("TestGetNestedMethod", t, func() {
 		convey.Convey("basic cases", func() {
 			convey.Convey("case nil", func() {
@@ -126,10 +130,12 @@ func (b *testB) BarB() {}
 
 type testC struct{}
 
+//go:noinline
 func (s testC) FooC() {
 	fmt.Print("")
 }
 
+//go:noinline
 func (s *testC) BarC() {
 	fmt.Print("")
 }
@@ -161,6 +167,9 @@ func NewTestFuncField() *testFuncField {
 }
 
 func TestGetMethod(t *testing.T) {
+	if !tool.IsGCFlagsSet() {
+		t.Skip("embedded method patch semantics require -gcflags='all=-N -l' on arm64")
+	}
 	convey.Convey("TestGetMethod", t, func() {
 		convey.Convey("basic cases", func() {
 			convey.Convey("case nil", func() {
@@ -268,6 +277,7 @@ type testInner struct {
 	_ int
 }
 
+//go:noinline
 func (testInner) FooNested() {
 	panic("not here")
 }
@@ -276,11 +286,15 @@ type testInnerP struct {
 	_ string
 }
 
+//go:noinline
 func (*testInnerP) FooNested() {
 	panic("not here p")
 }
 
 func TestGetMethod_Nested(t *testing.T) {
+	if !tool.IsGCFlagsSet() {
+		t.Skip("nested interface method patch semantics require -gcflags='all=-N -l' on arm64")
+	}
 	PatchConvey("TestGetMethod_Nested", t, func() {
 		PatchConvey("instance implement", func() {
 			var obj testNested
@@ -400,6 +414,9 @@ func TestGetMethod_Nested(t *testing.T) {
 }
 
 func TestGetMethod_Unexported(t *testing.T) {
+	if !tool.IsGCFlagsSet() {
+		t.Skip("unexported method patch semantics require -gcflags='all=-N -l' on arm64")
+	}
 	PatchConvey("TestGetMethod_Unexported", t, func() {
 		PatchConvey("struct method", func() {
 			fn := GetMethod(new(bytes.Buffer), "empty")
@@ -467,6 +484,7 @@ type testNilPointerInner struct {
 	_ int
 }
 
+//go:noinline
 func (t *testNilPointerInner) Foo() string {
 	return "not here"
 }

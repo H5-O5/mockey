@@ -27,6 +27,7 @@ import (
 	. "github.com/smartystreets/goconvey/convey"
 )
 
+//go:noinline
 func Fun(a string) string {
 	fmt.Println(a)
 	return a
@@ -34,11 +35,13 @@ func Fun(a string) string {
 
 type Class struct{}
 
+//go:noinline
 func (*Class) FunA(a string) string {
 	fmt.Println(a)
 	return a
 }
 
+//go:noinline
 func (*Class) VariantParam(a string, b ...string) string {
 	fmt.Println("VariantParam")
 	return a
@@ -46,22 +49,27 @@ func (*Class) VariantParam(a string, b ...string) string {
 
 type class struct{ in string }
 
+//go:noinline
 func (c class) func1(hint string) string {
 	return fmt.Sprintf("%v %v", c.in, hint)
 }
 
+//go:noinline
 func MultiReturn() (int, int) {
 	return 0, 0 * int(math.Abs(1))
 }
 
+//go:noinline
 func MultiReturnErr() (int, int, error) {
 	return 0, 0, errors.New("old")
 }
 
+//go:noinline
 func VariantParam(a int, b ...int) (int, int) {
 	return a, b[0]
 }
 
+//go:noinline
 func ShortFun() {}
 
 func TestNoConvey(t *testing.T) {
@@ -230,6 +238,7 @@ type TestImpl struct {
 	a string
 }
 
+//go:noinline
 func (i *TestImpl) A() string {
 	fmt.Println(i.a)
 	return i.a
@@ -239,6 +248,7 @@ type TestI interface {
 	A() string
 }
 
+//go:noinline
 func ReturnImpl() TestI {
 	return &TestImpl{a: "a"}
 }
@@ -348,8 +358,10 @@ func TestMockUnsafe(t *testing.T) {
 
 type foo struct{ i int }
 
+//go:noinline
 func (f *foo) Name(i int) string { return fmt.Sprintf("Fn-%v-%v", f.i, i) }
 
+//go:noinline
 func (f *foo) Foo() int { return f.i * int(math.Abs(1)) }
 
 func TestMockOrigin(t *testing.T) {

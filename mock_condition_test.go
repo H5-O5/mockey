@@ -27,17 +27,21 @@ type multiConditionStruct struct {
 	Field string
 }
 
+//go:noinline
 func (m *multiConditionStruct) Foo(in int) string {
 	return m.Field
+}
+
+//go:noinline
+func multiConditionBase(i int) string {
+	fmt.Println()
+	return "fn:not here"
 }
 
 func TestMultiCondition(t *testing.T) {
 	PatchConvey("multi condition", t, func() {
 		PatchConvey("function", func() {
-			fn := func(i int) string {
-				fmt.Println() // to avoid an old unresolved bug,see https://github.com/bytedance/mockey/issues/24
-				return "fn:not here"
-			}
+			fn := multiConditionBase
 
 			builder := Mock(fn)
 			builder.When(func(i int) bool { return i > 0 && i < 3 }).To(func(i int) string {

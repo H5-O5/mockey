@@ -17,6 +17,7 @@
 package monkey
 
 import (
+	"fmt"
 	"reflect"
 	"runtime"
 	"sync"
@@ -131,6 +132,13 @@ func PatchValue(target, hook, proxy reflect.Value, unsafe bool) *Patch {
 		cuttingIdx = disassembleOrExplain(targetAddr, targetCodeBuf, len(hookCode), !unsafe)
 		proxyCode = common.AllocatePage()
 		proxyPrefix = targetCodeBuf[:cuttingIdx]
+		if relocated, err := inst.Relocate(targetCodeBuf[:cuttingIdx], targetAddr, common.PtrOf(proxyCode)); err == nil {
+			proxyPrefix = relocated
+		} else if unsafe {
+			tool.DebugPrintf("PatchValue: MockUnsafe keeps verbatim displaced prefix for %s: %v\n", targetName(targetAddr), err)
+		} else {
+			tool.Assert(false, "cannot relocate displaced entry of %s: %v", targetName(targetAddr), err)
+		}
 	} else if idx, ok := inst.TryDisassemble(targetCodeBuf, len(hookCode), true); ok && !inst.HasPCRelative(targetCodeBuf[:idx]) {
 		// Preserve the existing 12-byte entry sequence when its trampoline prefix
 		// is position independent.
@@ -290,4 +298,11 @@ func PatchFunc(fn, hook, proxy interface{}, unsafe bool) *Patch {
 	vv := reflect.ValueOf(fn)
 	tool.Assert(vv.Kind() == reflect.Func, "'%v' is not a function", fn)
 	return PatchValue(vv, reflect.ValueOf(hook), reflect.ValueOf(proxy), unsafe)
+}
+
+func targetName(addr uintptr) string {
+	if f := runtime.FuncForPC(addr); f != nil {
+		return f.Name()
+	}
+	return fmt.Sprintf("0x%x", addr)
 }

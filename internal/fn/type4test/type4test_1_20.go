@@ -33,14 +33,21 @@ type A0 struct {
 func (f A0) Foo(i int)  {}
 func (f *A0) Bar(i int) {}
 
+//go:noinline
 func Foo[T any](t T) {}
 
+//go:noinline
 func NoArgs[T any]() {}
 
 type A[T any] struct {
 	Inner T
 }
 
-func (f A[T]) Foo(i int)       {}
+//go:noinline
+func (f A[T]) Foo(i int) {}
+
+//go:noinline
 func (f *A[T]) Bar(i int, t T) {}
-func (f *A[T]) NoArgs()        {}
+
+//go:noinline
+func (f *A[T]) NoArgs() {}

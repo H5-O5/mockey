@@ -61,6 +61,15 @@ func Fun3() bool {
 	return false
 }
 
+//go:noinline
+func unpatchAllFn1() string { return "fn1" }
+
+//go:noinline
+func unpatchAllFn2() string { return "fn2" }
+
+//go:noinline
+func unpatchAllFn3() string { return "fn3" }
+
 func TestPatchConvey(t *testing.T) {
 	PatchConvey("test", t, func() {
 		Mock(Fun1).Return(true).Build()
@@ -99,15 +108,9 @@ func TestPatchConvey(t *testing.T) {
 }
 
 func TestUnpatchAll_Convey(t *testing.T) {
-	fn1 := func() string {
-		return "fn1"
-	}
-	fn2 := func() string {
-		return "fn2"
-	}
-	fn3 := func() string {
-		return "fn3"
-	}
+	fn1 := unpatchAllFn1
+	fn2 := unpatchAllFn2
+	fn3 := unpatchAllFn3
 
 	Mock(fn1).Return("mocked").Build()
 	if fn1() != "mocked" {
@@ -200,15 +203,9 @@ func TestPatchRun(t *testing.T) {
 
 // TestUnpatchAll_PatchRun tests UnpatchAll functionality within PatchRun
 func TestUnpatchAll_PatchRun(t *testing.T) {
-	fn1 := func() string {
-		return "fn1"
-	}
-	fn2 := func() string {
-		return "fn2"
-	}
-	fn3 := func() string {
-		return "fn3"
-	}
+	fn1 := unpatchAllFn1
+	fn2 := unpatchAllFn2
+	fn3 := unpatchAllFn3
 
 	// Mock outside PatchRun
 	Mock(fn1).Return("mocked").Build()

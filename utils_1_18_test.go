@@ -24,6 +24,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/bytedance/mockey/internal/tool"
 	"github.com/smartystreets/goconvey/convey"
 )
 
@@ -73,6 +74,9 @@ func (s testDG[T]) FooD() {}
 func (s *testDG[T]) BarD() {}
 
 func TestGetMethod_Generic(t *testing.T) {
+	if !tool.IsGCFlagsSet() {
+		t.Skip("generic get-method patch cases require -gcflags='all=-N -l' on arm64")
+	}
 	convey.Convey("TestGetMethod", t, func() {
 		convey.Convey("basic cases", func() {
 			convey.Convey("case testAG", func() {

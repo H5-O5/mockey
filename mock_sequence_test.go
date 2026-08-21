@@ -25,9 +25,18 @@ import (
 	"github.com/smartystreets/goconvey/convey"
 )
 
+//go:noinline
+func sequenceRaceBase() int { return -1 * int(math.Abs(1)) }
+
+//go:noinline
+func sequenceBase() (string, int) {
+	fmt.Println("original fn")
+	return "fn: not here", -1
+}
+
 func TestSequenceRace(t *testing.T) {
 	PatchConvey("test sequence race", t, func(c convey.C) {
-		fn := func() int { return -1 * int(math.Abs(1)) }
+		fn := sequenceRaceBase
 		mocker := Mock(fn).Return(Sequence(0).Then(1)).Build()
 
 		wg := sync.WaitGroup{}
@@ -49,10 +58,7 @@ func TestSequenceRace(t *testing.T) {
 
 func TestSequence(t *testing.T) {
 	PatchConvey("test sequence", t, func() {
-		fn := func() (string, int) {
-			fmt.Println("original fn")
-			return "fn: not here", -1
-		}
+		fn := sequenceBase
 
 		PatchConvey("normal", func() {
 			tests := []struct {

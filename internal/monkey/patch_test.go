@@ -24,10 +24,12 @@ import (
 	. "github.com/smartystreets/goconvey/convey"
 )
 
+//go:noinline
 func Target(in string) string {
 	return strings.Repeat(in, 1)
 }
 
+//go:noinline
 func Hook(in string) string {
 	return "MOCKED!"
 }

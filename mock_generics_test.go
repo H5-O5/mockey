@@ -24,9 +24,11 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/bytedance/mockey/internal/tool"
 	"github.com/smartystreets/goconvey/convey"
 )
 
+//go:noinline
 func sum[T int | float64](l, r T) T {
 	return l + r
 }
@@ -35,18 +37,22 @@ type generic[T int | string] struct {
 	a T
 }
 
+//go:noinline
 func (g generic[T]) Value() T {
 	return g.a
 }
 
+//go:noinline
 func (g generic[T]) Value2(hint T) string {
 	return fmt.Sprintf("%v %v", g.a, hint)
 }
 
+//go:noinline
 func (g *generic[T]) Value3(hint T) string {
 	return fmt.Sprintf("%v %v", g.a, hint)
 }
 
+//go:noinline
 func (g generic[T]) func1(hint T) string {
 	return fmt.Sprintf("%v %v", g.a, hint)
 }
@@ -55,6 +61,7 @@ type genericMap[K comparable, V any] struct {
 	m map[K]V
 }
 
+//go:noinline
 func (gm *genericMap[K, V]) Get(key K) V {
 	return gm.m[key]
 }
@@ -196,7 +203,15 @@ type Large15[T any] struct {
 	_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _ T
 }
 
+func skipGenericShapeSensitiveTests(t *testing.T) {
+	t.Helper()
+	if !tool.IsGCFlagsSet() {
+		t.Skip("generic shape-sensitive tests require -gcflags='all=-N -l' on arm64")
+	}
+}
+
 func TestGenericArg(t *testing.T) {
+	skipGenericShapeSensitiveTests(t)
 	PatchConvey("args", t, func() {
 		GenericArgRunner[uint8]("uint8")
 		GenericArgRunner[uint16]("uint16")
@@ -209,6 +224,7 @@ func TestGenericArg(t *testing.T) {
 }
 
 func TestGenericRet(t *testing.T) {
+	skipGenericShapeSensitiveTests(t)
 	PatchConvey("rets", t, func() {
 		GenericRetRunner[uint8]("uint8")
 		GenericRetRunner[uint16]("uint16")
@@ -221,6 +237,7 @@ func TestGenericRet(t *testing.T) {
 }
 
 func TestGenericArgRet(t *testing.T) {
+	skipGenericShapeSensitiveTests(t)
 	PatchConvey("args-rets", t, func() {
 		GenericArgRetRunner[uint8]("uint8")
 		GenericArgRetRunner[uint16]("uint16")
@@ -233,6 +250,7 @@ func TestGenericArgRet(t *testing.T) {
 }
 
 func TestGenericArgValues(t *testing.T) {
+	skipGenericShapeSensitiveTests(t)
 	PatchConvey("args-value", t, func() {
 		PatchConvey("single", func() {
 			var arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13, arg14, arg15 uintptr = 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15
