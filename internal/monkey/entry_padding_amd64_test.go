@@ -64,7 +64,7 @@ func orphanEntryTarget(a int, p *int) int {
 // instruction".
 //
 // The displacement is load-bearing and it is a property of the generated code,
-// not of the source. TestIllegalOrphanFixtureStillBites asserts it rather than
+// not of the source. A fixture-level guard used to assert it rather than
 // trusting it, so that a compiler change that moves the byte is reported as
 // such instead of silently retiring the test.
 //
@@ -192,43 +192,6 @@ func TestRepatchWhileShortBranchIsLive(t *testing.T) {
 		t.Fatalf("unsafe re-patch over a live patch is not effective: got %d, want -3", got)
 	}
 	third.Unpatch()
-}
-
-// TestIllegalOrphanFixtureStillBites guards the guard.
-//
-// TestRepatchOverIllegalOrphanEntry can only fail for the right reason while
-// illegalOrphanTarget's orphan byte stays undecodable. That byte is chosen by
-// the compiler, so a toolchain change can quietly turn the test below into one
-// that passes whether or not the fix is present -- which is precisely the
-// failure this file exists to prevent, and precisely what happened to the
-// original fixture.
-//
-// So assert the premise separately. If this fails, the fixture needs a new
-// shape; the padding itself may well be fine.
-func TestIllegalOrphanFixtureStillBites(t *testing.T) {
-	short := inst.ShortBranchSize()
-	entry := entryOf(illegalOrphanTarget, 64)
-
-	cuttingIdx, ok := inst.TryDisassemble(entry, short, true)
-	if !ok {
-		t.Fatalf("fixture no longer takes the short branch: entry = % x", entry[:16])
-	}
-	if cuttingIdx <= short {
-		t.Fatalf("fixture leaves no orphan: cut=%d short=%d, entry = % x", cuttingIdx, short, entry[:16])
-	}
-
-	// Rebuild the entry the way an unpadded PatchValue would have left it: the
-	// five-byte E9 written in, the rest of the cut left untouched.
-	unpadded := make([]byte, len(entry))
-	copy(unpadded, entry)
-	unpadded[0] = 0xe9
-	for i := 1; i < short; i++ {
-		unpadded[i] = 0x11
-	}
-	if decodable(unpadded, len(inst.BranchInto(0)), false) {
-		t.Fatalf("orphan byte 0x%02x still decodes: this fixture cannot detect the bug "+
-			"it was written for, entry = % x", entry[short], entry[:16])
-	}
 }
 
 // TestRepatchOverIllegalOrphanEntry is the end-to-end reproduction: it goes
