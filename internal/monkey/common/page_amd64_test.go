@@ -1,6 +1,3 @@
-//go:build go1.23 && !mockey_stw
-// +build go1.23,!mockey_stw
-
 /*
  * Copyright 2022 ByteDance Inc.
  *
@@ -17,20 +14,25 @@
  * limitations under the License.
  */
 
-package stw
+package common
 
 import (
-	_ "unsafe"
+	"reflect"
+	"testing"
 )
 
-func newSTWCtx() ctx {
-	return &stwCtx{}
-}
+func TestAllocatePageNear(t *testing.T) {
+	target := reflect.ValueOf(TestAllocatePageNear).Pointer()
+	page, err := AllocatePageNear(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ReleasePage(page)
 
-type stwCtx struct{}
-
-func (ctx *stwCtx) StopTheWorld() {
-}
-
-func (ctx *stwCtx) StartTheWorld() {
+	start := PtrOf(page)
+	if !Rel32Reachable(target+5, start) || !Rel32Reachable(target+5, start+uintptr(len(page)-1)) {
+		t.Fatalf("page [0x%x, 0x%x] is outside rel32 range of 0x%x", start, start+uintptr(len(page)-1), target)
+	}
+	page[0] = 1
+	page[len(page)-1] = 2
 }
