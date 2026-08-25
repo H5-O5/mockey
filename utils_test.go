@@ -172,12 +172,12 @@ func TestGetMethod(t *testing.T) {
 				convey.So(func() { GetMethod(instance, "BarC") }, convey.ShouldNotPanic)
 				convey.So(func() { instance.FooC() }, convey.ShouldPanicWith, "shouldn't here")
 				convey.So(func() {
-					reflect.ValueOf(GetMethod(instance, "FooC")).Call([]reflect.Value{reflect.ValueOf(instance.testC)})
-				}, convey.ShouldNotPanic)
+					reflect.ValueOf(GetMethod(instance, "FooC")).Call([]reflect.Value{reflect.ValueOf(instance)})
+				}, convey.ShouldPanicWith, "shouldn't here")
 				convey.So(func() { instance.BarC() }, convey.ShouldPanicWith, "shouldn't here")
 				convey.So(func() {
-					reflect.ValueOf(GetMethod(instance, "BarC")).Call([]reflect.Value{reflect.ValueOf(&instance.testC)})
-				}, convey.ShouldNotPanic)
+					reflect.ValueOf(GetMethod(instance, "BarC")).Call([]reflect.Value{reflect.ValueOf(&instance)})
+				}, convey.ShouldPanicWith, "shouldn't here")
 			})
 
 			convey.Convey("case testB", func() {
@@ -219,8 +219,16 @@ func TestGetMethod(t *testing.T) {
 				instance := testA{}
 				Mock(GetMethod(instance, "FooC")).To(func() { panic("should here") }).Build()
 				Mock(GetMethod(instance, "BarC")).To(func() { panic("should here") }).Build()
-				convey.So(func() { instance.FooC() }, convey.ShouldPanicWith, "shouldn't here") // no effect, didn't call testC.FooC()
-				convey.So(func() { instance.BarC() }, convey.ShouldPanicWith, "shouldn't here") // no effect, didn't call testC.BarC()
+				// instance.FooC() denotes testA's OWN FooC, because a method
+				// declared on the containing type shadows the promoted one. So
+				// that is what GetMethod resolves and what Mock replaces, and
+				// the call now observes the mock. Before, GetMethod returned
+				// testC.FooC -- a function this call never reaches -- so the
+				// mock silently did nothing. The GetNestedMethod block above
+				// still asserts the old shape, because reaching the embedded
+				// method is that API's documented job.
+				convey.So(func() { instance.FooC() }, convey.ShouldPanicWith, "should here")
+				convey.So(func() { instance.BarC() }, convey.ShouldPanicWith, "should here")
 			})
 
 			PatchConvey("case testB", func() {
@@ -444,5 +452,63 @@ func TestPrivateMethod(t *testing.T) {
 				convey.So(mocker.MockTimes(), convey.ShouldEqual, 1)
 			})
 		})
+	})
+}
+
+// The shape below is the one that broke real builds: a wrapper client embeds a
+// lower-level client and RE-DECLARES a method the embedded type also has,
+// returning the wrapper type rather than the embedded one -- exactly
+// code.byted.org/kv/goredis.Client embedding *redis-v6.Client and declaring
+// its own WithContext.
+//
+// Mock(GetMethod(c, "WithContext")).Return(c) must mock the method
+// c.WithContext(...) actually dispatches to. Resolving the embedded one
+// instead mocked a function the caller never reaches AND gave it a signature
+// the returned value does not fit, so the mock blew up from inside the hook
+// with "return args not match".
+type shadowInner struct{ n string }
+
+func (c *shadowInner) WithContext(s string) *shadowInner { return c }
+
+type shadowOuter struct {
+	*shadowInner
+}
+
+func (c *shadowOuter) WithContext(s string) *shadowOuter {
+	c.shadowInner = c.shadowInner.WithContext(s)
+	return c
+}
+
+func TestGetMethodDeclaredShadowsPromoted(t *testing.T) {
+	convey.Convey("a declared method shadows a promoted one", t, func() {
+		c := &shadowOuter{shadowInner: &shadowInner{n: "x"}}
+		convey.So(reflect.TypeOf(GetMethod(c, "WithContext")).String(),
+			convey.ShouldEqual, "func(*mockey.shadowOuter, string) *mockey.shadowOuter")
+		// The embedded type keeps resolving to its own method.
+		convey.So(reflect.TypeOf(GetMethod(c.shadowInner, "WithContext")).String(),
+			convey.ShouldEqual, "func(*mockey.shadowInner, string) *mockey.shadowInner")
+		// And the embedded one stays reachable on purpose, which is what
+		// GetNestedMethod is for. Nothing is taken away.
+		convey.So(reflect.TypeOf(GetNestedMethod(c, "WithContext")).String(),
+			convey.ShouldEqual, "func(*mockey.shadowInner, string) *mockey.shadowInner")
+	})
+}
+
+// A purely promoted method -- nothing declares it on the outer type -- must
+// still resolve to the embedded one. This is the dc/meego_ai call site shape:
+//   Mock(GetMethod(goredisClient, "Del")).To(func(...) *redisv6.IntCmd { ... })
+// where goredis does not declare Del at all.
+type promotedInner struct{}
+
+func (promotedInner) OnlyInner() string { return "inner" }
+
+type promotedOuter struct {
+	promotedInner
+}
+
+func TestGetMethodPurelyPromotedStillResolves(t *testing.T) {
+	convey.Convey("a purely promoted method still resolves to the embedded one", t, func() {
+		convey.So(reflect.TypeOf(GetMethod(&promotedOuter{}, "OnlyInner")).String(),
+			convey.ShouldEqual, "func(mockey.promotedInner) string")
 	})
 }
