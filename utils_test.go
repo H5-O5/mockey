@@ -489,3 +489,26 @@ func TestGetMethod_NilPointer(t *testing.T) {
 		})
 	})
 }
+
+type nilContextInner struct{}
+
+func (*nilContextInner) WithContext(string) int { return 1 }
+
+type nilContextOuter struct {
+	*nilContextInner
+}
+
+func (nilContextOuter) WithContext(string) string { return "outer" }
+
+type nilContextFallback struct {
+	*nilContextInner
+}
+
+func TestGetMethod_NilEmbeddedDeferred(t *testing.T) {
+	convey.Convey("nil embedded pointer defers to containing direct method", t, func() {
+		convey.So(reflect.TypeOf(GetMethod(nilContextOuter{}, "WithContext")).String(),
+			convey.ShouldEqual, "func(mockey.nilContextOuter, string) string")
+		convey.So(reflect.TypeOf(GetMethod(nilContextFallback{}, "WithContext")).String(),
+			convey.ShouldEqual, "func(*mockey.nilContextInner, string) int")
+	})
+}
