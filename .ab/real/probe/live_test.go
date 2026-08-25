@@ -39,3 +39,33 @@ func TestRealLiveReturnAcceptsOuter(t *testing.T) {
 	}
 	t.Log("LIVE acceptance: Return(*goredis.Client) accepted and observed")
 }
+
+// REGRESSION GUARD for the real call site in dc/meego_ai:
+//   mockey.Mock(mockey.GetMethod(container.Default.Redis.AICache.Client, "Del")).
+//       To(func(keys ...string) *redisv6.IntCmd { ... })
+//
+// goredis does NOT declare Del. It is a purely promoted method reaching
+// *goredis.Client through *redis.Client's embedded cmdable, so nothing shadows
+// it and GetMethod must still resolve the EMBEDDED one -- the hook there
+// returns *redisv6.IntCmd, which only type-checks against the embedded
+// signature. This is the case the precedence change could most easily have
+// broken, and it is load-bearing for existing user tests.
+func TestRealPromotedWithNoDeclaredShadow(t *testing.T) {
+	got := reflect.TypeOf(mockey.GetMethod(liveClient(), "Del"))
+	t.Logf("PROMOTED GetMethod(*goredis.Client, Del) -> %v", got)
+	if want := reflect.TypeOf(&redis.IntCmd{}); got.Out(0) != want {
+		t.Fatalf("resolved %v (out %v), want %v", got, got.Out(0), want)
+	}
+}
+
+func TestRealPromotedDelMockObserved(t *testing.T) {
+	sentinel := &redis.IntCmd{}
+	m := mockey.Mock(mockey.GetMethod(liveClient(), "Del")).To(func(keys ...string) *redis.IntCmd {
+		return sentinel
+	}).Build()
+	defer m.UnPatch()
+	if got := liveClient().Del("k"); got != sentinel {
+		t.Fatalf("promoted Del mock not observed: got %p want %p", got, sentinel)
+	}
+	t.Log("PROMOTED Del: mock observed through *goredis.Client")
+}

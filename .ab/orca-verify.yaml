@@ -76,6 +76,36 @@ commands:
         }
         t.Log("acceptance: Return(*goredis.Client) accepted and observed")
     }
+
+    // REGRESSION GUARD for the real call site in dc/meego_ai:
+    //   mockey.Mock(mockey.GetMethod(container.Default.Redis.AICache.Client, "Del"))
+    //       .To(func(keys ...string) *redisv6.IntCmd { ... })
+    // goredis does NOT declare Del: it is a purely promoted method reaching
+    // *goredis.Client through *redis.Client's embedded cmdable. Nothing may
+    // shadow it, so GetMethod must still resolve the EMBEDDED one and the hook
+    // must still be allowed to return *redisv6.IntCmd. This is precisely the
+    // case the precedence change could have broken.
+    func TestPromotedWithNoDeclaredShadowStillResolves(t *testing.T) {
+        c := live()
+        got := reflect.TypeOf(mockey.GetMethod(c, "Del"))
+        t.Logf("GetMethod(*goredis.Client, Del) -> %v", got)
+        if want := reflect.TypeOf(&redis.IntCmd{}); got.Out(0) != want {
+            t.Fatalf("resolved %v (out %v), want %v", got, got.Out(0), want)
+        }
+    }
+
+    // And it must still be mockable end to end through the outer client.
+    func TestPromotedDelMockObserved(t *testing.T) {
+        sentinel := &redis.IntCmd{}
+        m := mockey.Mock(mockey.GetMethod(live(), "Del")).To(func(keys ...string) *redis.IntCmd {
+            return sentinel
+        }).Build()
+        defer m.UnPatch()
+        if got := live().Del("k"); got != sentinel {
+            t.Fatalf("promoted Del mock not observed: got %p want %p", got, sentinel)
+        }
+        t.Log("promoted Del: mock observed through *goredis.Client")
+    }
     GO
   - go mod tidy
   - go version && go list -m github.com/bytedance/mockey
