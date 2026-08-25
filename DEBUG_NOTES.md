@@ -181,3 +181,35 @@ sed "s|FIX_REF|v0.0.0-${TS}-${SHORT}|" .ab/orca-verify.yaml > /tmp/v.yaml
 
 分支已 push 到 `H5-O5/mockey`（`fix/return-type-mismatch`，author/committer 均为 H5-O5），
 **未开 PR**。远程 CI 能拉到它，也正是上面这轮验收成立的前提。
+
+## 9. ⚠️ 更正第 3 节：`-N` 在真实 goredis 上不是变量（探针实测）
+
+第 3 节的 2×2 矩阵用的是**我造的短函数**，据此推出「上游不带 `-N` 时因为
+`function is too short to patch` 而走不到 `CheckReturnValues`」。
+**这个推论对真实 goredis 不成立**，下面是实测。
+
+用**未修复**的 mockey（`3b9352a`）+ 真实 goredis/redis-v6，把三件事拆开各自上报
+（不 assert，保证两个 arm 都跑完）：解析成什么 / patch 是否成功 / 调用是否 panic。
+
+job `481905573`，两个 arm 结果**完全一致**：
+
+| | `-N -l` | `-l` |
+|---|---|---|
+| `GetMethod` | `func(*redis.Client, ...) *redis.Client`（错） | 同左 |
+| `Build()` | `BUILD_OK` | `BUILD_OK` |
+| 调用 | `CALL_PANIC: return args not match ...` | 同左 |
+
+`redis-v6.(*Client).WithContext`（`redis_context.go:31`）**根本不短**，
+两种配置都 patch 得上。所以：
+
+- **`-N` 不影响这个缺陷的任何一环** —— 不影响解析，不影响可 patch 性，不影响 panic。
+- 「too short to patch」只在**人造小函数**上出现，是我的复现物的性质，**不是现场的性质**。
+- 因此**不能**说「上游想 patch 但没 patch 上，于是代码依赖了这个错误行为」：
+  patch 一直成功，panic 一直会发生，上游在这个形状上同样是炸的。
+
+🔴 **那 CI 之前为什么是绿的？目前没有证据，不要编。** 已经排除的：
+`-N`、patch 失败。剩下待查的方向：那些 `*_BitsUTGen` 测试是不是新生成的、
+或者之前是否根本没执行到那条 `.Return(...)`。**在拿到证据前，本节只陈述已排除项。**
+
+（第 3 节的矩阵本身没错，错的是把它外推到真实类型上。保留它是因为它仍然说明
+fork 降低了可 patch 门槛这一事实，但那不是本次现场失败的成因。）
