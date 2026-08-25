@@ -1,0 +1,97 @@
+template: go@bazel
+clone_depth: 1
+trigger:
+  change:
+go_version: "1.24"
+env: boe
+enable_consul: true
+envs:
+  MOCKEY_CHECK_GCFLAGS: "false"
+commands:
+  # DIAGNOSTIC: does UPSTREAM mockey v1.3.0 (no fork at all) hit the same
+  # defect on the REAL
+  # goredis/redis-v6 types, what exactly does -N change?
+  #
+  # Three separable questions, reported rather than asserted, so both arms
+  # always run to completion:
+  #   1. does GetMethod resolve the wrong (embedded) method?
+  #   2. is that wrongly-resolved target even patchable?
+  #   3. does calling through the outer client panic?
+  - export CGO_ENABLED=1
+  - mkdir -p /tmp/whyn && cd /tmp/whyn
+  - go mod init whyn
+  - go mod edit -require=github.com/bytedance/mockey@v1.3.0
+  - go mod edit -require=code.byted.org/kv/goredis@v5.7.3+incompatible
+  - go mod edit -require=code.byted.org/kv/redis-v6@v1.1.5
+  - |
+    cat > whyn_test.go <<'GO'
+    package whyn
+
+    import (
+        "context"
+        "reflect"
+        "runtime"
+        "testing"
+
+        "code.byted.org/kv/goredis"
+        redis "code.byted.org/kv/redis-v6"
+        "github.com/bytedance/mockey"
+    )
+
+    func live() *goredis.Client {
+        return &goredis.Client{Client: redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})}
+    }
+
+    // How big is the function mockey would have to patch? This is what -N
+    // actually protects: size, not semantics.
+    func TestSize(t *testing.T) {
+        m, _ := reflect.PtrTo(reflect.TypeOf(redis.Client{})).MethodByName("WithContext")
+        pc := m.Func.Pointer()
+        f := runtime.FuncForPC(pc)
+        file, line := f.FileLine(pc)
+        t.Logf("PROBE target=%s entry=%#x %s:%d", f.Name(), pc, file, line)
+    }
+
+    func TestArm(t *testing.T) {
+        c := live()
+        t.Logf("PROBE RESOLVE -> %v", reflect.TypeOf(mockey.GetMethod(c, "WithContext")))
+
+        func() {
+            defer func() {
+                if r := recover(); r != nil {
+                    t.Logf("PROBE BUILD_PANIC: %v", r)
+                }
+            }()
+            m := mockey.Mock(mockey.GetMethod(c, "WithContext")).Return(live()).Build()
+            defer m.UnPatch()
+            t.Log("PROBE BUILD_OK")
+
+            func() {
+                defer func() {
+                    if r := recover(); r != nil {
+                        t.Logf("PROBE CALL_PANIC: %v", r)
+                    }
+                }()
+                _ = live().WithContext(context.Background())
+                t.Log("PROBE CALL_OK_NO_PANIC")
+            }()
+        }()
+    }
+    GO
+  - go mod tidy
+  - go version && go list -m github.com/bytedance/mockey
+  # Run -N FIRST and never abort, so both arms always report.
+  # Both arms in ONE block scalar. Quoting individual command strings is not
+  # enough: a bare `- foo: bar` inside commands is parsed as a YAML map, which
+  # is how "cannot unmarshal !!map into string" happens. A block scalar hands
+  # the whole script through as opaque text, so shell quoting, `||` and colons
+  # stop being YAML's business.
+  - |
+    set +e
+    echo "===== ARM A: -N -l (status quo) ====="
+    go test ./... -gcflags=all="-N -l" -count=1 -v
+    echo "ARM_A_EXIT=$?"
+    echo "===== ARM B: -l (MR target, -N dropped) ====="
+    go test ./... -gcflags=all=-l -count=1 -v
+    echo "ARM_B_EXIT=$?"
+    exit 0

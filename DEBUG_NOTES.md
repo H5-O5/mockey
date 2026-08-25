@@ -213,3 +213,51 @@ job `481905573`，两个 arm 结果**完全一致**：
 
 （第 3 节的矩阵本身没错，错的是把它外推到真实类型上。保留它是因为它仍然说明
 fork 降低了可 patch 门槛这一事实，但那不是本次现场失败的成因。）
+
+## 10. 上游 CI 为什么绿（以及一处对上游的误判更正）
+
+### 10.1 ⚠️ 更正：那句 `// no effect` 注释不是上游在给 bug 背书
+
+我一度说「上游作者明知 mock 不生效，还断言它正确」。**这是冤枉上游的**，取原文才发现：
+
+上游 `origin/main:utils_test.go` 的 `case testA` **patch cases** 调的是 **`GetNestedMethod`**：
+
+```go
+Mock(GetNestedMethod(instance, "FooC")).To(func() { panic("should here") }).Build()
+convey.So(func() { instance.FooC() }, convey.ShouldPanicWith, "shouldn't here") // no effect, didn't call testC.FooC()
+```
+
+`GetNestedMethod` 是 deprecated 的旧 API，语义**本来就是**「钻进嵌套结构里找」，
+返回内嵌方法是它的**正确行为**，那句注释因此是准确的描述，不是在为缺陷辩护。
+
+而 fork（`3b9352a`）把这两行换成了 **`GetMethod`**，**注释却原样留着**。于是同一句话
+从「描述旧 API 的正确语义」变成了「给 `GetMethod` 的错误行为背书」。
+是 fork 换了 API 没重审断言，不是上游明知故犯。
+
+⇒ 这反而让本次改动更站得住：`GetMethod` 的文档承诺是「解析实例上的方法」，
+返回一个 `instance.FooC()` 永远 dispatch 不到的函数就是错的。
+
+### 10.2 上游 CI 绿的真正原因（两条，都与「明知」无关）
+
+1. **上游 `GetMethod` 的 `case testA` 只断言 `ShouldNotPanic`**
+   （`origin/main:utils_test.go` 172-176），**从不检查解析到了哪个方法**。
+   选错方法这件事，它的断言根本看不见。
+2. **上游测试类型是同签名的**：`testA.FooC` 与 `testC.FooC` 都是 `func()`。
+   选错只会让 mock 静默失效，**不会类型不匹配**。
+   goredis/redis 是同名**不同返回类型**，选错就直接撞上 `CheckReturnValues`。
+
+⇒ 上游 CI 测的不是「错误行为」，而是**测不到**这个错误。
+
+### 10.3 上游在真实 goredis 上同样炸（实测，非外推）
+
+job `481915955`：**纯上游 `v1.3.0`，不带任何 fork**（`go.mod` 里没有 `replace`），
+配真实 goredis/redis-v6：
+
+| | `-N -l` | `-l` |
+|---|---|---|
+| `RESOLVE` | `func(*redis.Client, ...) *redis.Client` | 同左 |
+| `BUILD` | `BUILD_OK` | `BUILD_OK` |
+| 调用 | `CALL_PANIC: return args not match ...` | 同左 |
+
+⇒ 缺陷是**上游的**，fork 只是继承；且与 `-N`、与 fork 的短跳转补丁都无关。
+第 3 节那个「上游不带 -N 会 too short to patch」的说法，在真实类型上不成立（见第 9 节）。
