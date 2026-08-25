@@ -142,3 +142,42 @@ no-op，会得到假阴性（测的其实还是修复版）。用 `git show <com
 不需要改测试仓的代码。`dc/meego_ai` 那些 `*_BitsUTGen` 测试写法是对的：
 它们 mock `goredis.Client` 的方法、返回 `*goredis.Client`，
 这在修复后完全自洽。需要的是把这个 fix 带进 `-G2` 映射的 fork commit。
+
+## 8. 远程 CI 验收（app/orca，真实用户仓，决定性 A/B）
+
+本地 docker 只能证明"在我造的环境里成立"。真正的验收是 **app/orca 在真实用户仓上跑**：
+同一份 YAML、同一个仓（`bytepay/bytepay_member_product`）、同一套真实依赖，
+**唯一变量是 mockey 的 commit**。
+
+| mockey commit | 远程结果 | 关键输出 |
+|---|---|---|
+| `3b9352a`（当前 fork main，**未修复**） | **failed** | `GetMethod(*goredis.Client) -> func(*redis.Client, ...) *redis.Client`<br>`panic: return args not match: target: func(*redis.Client, context.Context) *redis.Client, index: 0, current type: *goredis.Client` |
+| `3a3a3ed`（**本修复**） | **succeeded** | `GetMethod(*goredis.Client) -> func(*goredis.Client, ...) *goredis.Client`<br>三个测试在 `-l` 与 `-N -l` 下全 PASS |
+
+⭐ **未修复那条报出的 panic 与现场报告逐字一致**，所以复现的确实是同一个缺陷，
+而不是一个形状相似的替身。
+
+运行环境：`go1.25.0 linux/amd64`，真实 `code.byted.org/kv/goredis@v5.7.3` +
+`redis-v6@v1.1.5`，`MOCKEY_CHECK_GCFLAGS=false`。
+
+- 修复：<https://bits-cloudbuild.byted.org/web/jobs/481884352>
+- 未修复对照：<https://bits-cloudbuild.byted.org/web/jobs/481886951>
+
+复跑（YAML 在 `.ab/orca-verify.yaml`，`FIX_REF` 换成伪版本号）：
+
+```sh
+cd app/orca && go build -o /tmp/orca-cli .
+SHORT=$(git rev-parse --short=12 HEAD)
+TS=$(TZ=UTC0 git show -s --date='format-local:%Y%m%d%H%M%S' --format=%cd HEAD)
+sed "s|FIX_REF|v0.0.0-${TS}-${SHORT}|" .ab/orca-verify.yaml > /tmp/v.yaml
+/tmp/orca-cli run -R bytepay/bytepay_member_product -r master -u <user> -w -f @@/tmp/v.yaml
+```
+
+⚠️ `go mod edit -replace` **不接受裸 commit SHA**，必须是伪版本号
+`v0.0.0-<UTC commit time>-<12 位 SHA>`，否则 CI 会以
+`invalid: must be of the form v1.2.3` 直接失败。
+
+⚠️ 本地文件要写成 `-f @@/path/to.yaml`（`@@` 前缀），否则 orca 会当成仓内路径去取，报 404。
+
+分支已 push 到 `H5-O5/mockey`（`fix/return-type-mismatch`，author/committer 均为 H5-O5），
+**未开 PR**。远程 CI 能拉到它，也正是上面这轮验收成立的前提。

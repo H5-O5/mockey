@@ -1,0 +1,87 @@
+template: go@bazel
+clone_depth: 1
+trigger:
+  change:
+go_version: "1.24"
+env: boe
+enable_consul: true
+envs:
+  MOCKEY_CHECK_GCFLAGS: "false"
+commands:
+  # Verify the GetMethod shadowing fix against the REAL byted redis clients,
+  # inside a real repo on the real CI image -- not a local stand-in.
+  #
+  # goredis.Client embeds *redis-v6.Client and RE-DECLARES WithContext
+  # returning *goredis.Client. GetMethod must resolve goredis's own method,
+  # otherwise Mock(...).Return(*goredis.Client) blows up with
+  #   "return args not match: ... current type: *goredis.Client"
+  # which is the field failure this run reproduces and then pins.
+  - export CGO_ENABLED=1
+  - mkdir -p /tmp/mockeycheck && cd /tmp/mockeycheck
+  - go mod init mockeycheck
+  # Pin mockey to the branch under test.
+  - go mod edit -require=github.com/bytedance/mockey@v1.4.6
+  - go mod edit -replace=github.com/bytedance/mockey=github.com/H5-O5/mockey@FIX_REF
+  - go mod edit -require=code.byted.org/kv/goredis@v5.7.3+incompatible
+  - go mod edit -require=code.byted.org/kv/redis-v6@v1.1.5
+  - |
+    cat > probe_test.go <<'GO'
+    package mockeycheck
+
+    import (
+        "context"
+        "reflect"
+        "testing"
+
+        "code.byted.org/kv/goredis"
+        redis "code.byted.org/kv/redis-v6"
+        "github.com/bytedance/mockey"
+    )
+
+    // A live goredis client always has a NON-NIL embedded *redis.Client, which
+    // is the only shape that reaches the buggy branch. A typed-nil outer takes
+    // the already-fixed deferred branch and would be vacuous.
+    func live() *goredis.Client {
+        return &goredis.Client{Client: redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})}
+    }
+
+    func TestResolvesDeclaredNotPromoted(t *testing.T) {
+        c := live()
+        if c.Client == nil {
+            t.Fatal("embedded *redis.Client is nil: not the field shape")
+        }
+        got := reflect.TypeOf(mockey.GetMethod(c, "WithContext"))
+        t.Logf("GetMethod(*goredis.Client) -> %v", got)
+        if want := reflect.TypeOf(&goredis.Client{}); got.Out(0) != want {
+            t.Fatalf("resolved %v (out %v), want a method returning %v", got, got.Out(0), want)
+        }
+    }
+
+    // The embedded type must stay mockable in its own right.
+    func TestEmbeddedStillResolvable(t *testing.T) {
+        got := reflect.TypeOf(mockey.GetMethod(redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"}), "WithContext"))
+        t.Logf("GetMethod(*redis.Client) -> %v", got)
+        if want := reflect.TypeOf(&redis.Client{}); got.Out(0) != want {
+            t.Fatalf("resolved %v (out %v), want %v", got, got.Out(0), want)
+        }
+    }
+
+    // The acceptance path: this exact shape produced the field panic.
+    func TestReturnOuterAccepted(t *testing.T) {
+        sentinel := live()
+        m := mockey.Mock(mockey.GetMethod(live(), "WithContext")).Return(sentinel).Build()
+        defer m.UnPatch()
+        if got := live().WithContext(context.Background()); got != sentinel {
+            t.Fatalf("mock not observed: got %p want %p", got, sentinel)
+        }
+        t.Log("acceptance: Return(*goredis.Client) accepted and observed")
+    }
+    GO
+  - go mod tidy
+  - go version && go list -m github.com/bytedance/mockey
+  # The MR's whole point is dropping -N, so prove it under -l alone AND under
+  # the status quo, on linux/amd64.
+  - echo "===== gcflags=all=-l (MR target, -N dropped) ====="
+  - go test ./... -gcflags=all=-l -count=1 -v
+  - echo "===== gcflags=all=-N -l (status quo) ====="
+  - go test ./... -gcflags=all="-N -l" -count=1 -v
