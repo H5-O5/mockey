@@ -111,7 +111,27 @@ fork 去掉了这个前提，把一个一直存在的 bug 从「静默 + 偶发�
 | `go test ./... -gcflags=all="-N -l"` | ok（全包） |
 | `go test ./... -gcflags=all=-l`（MR 目标配置） | ok（全包） |
 | goredis 形状复现（`.ab/repro`），两种 gcflags | 修复前 panic，修复后 PASS |
-| 负向控制：`utils.go` 回退成有 bug 的版本 | 新回归测试变红，且报出**一模一样**的 `return args not match: ... current type: *mockey.shadowOuter` |
+| 负向控制（合成类型）：`utils.go` 回退 | 新回归测试变红，报出 `... current type: *mockey.shadowOuter` |
+| **真实依赖验收**（`.ab/real`，真 `goredis@v5.7.3` + `redis-v6@v1.1.5`，go1.24），两种 gcflags | **ALL OK** |
+| **真实依赖负向控制** | **精确复现现场 panic，与报告逐字一致**（见下） |
+
+真实类型上回退修复后：
+
+```
+resolved func(*redis.Client, context.Context) *redis.Client (out *redis.Client),
+  want a method returning *goredis.Client
+panic: return args not match: target: func(*redis.Client, context.Context)
+  *redis.Client, index: 0, current type: *goredis.Client
+```
+
+⚠️ **必须用 non-nil 的内嵌字段才测得出**：`goredis.Client` 与 `redis.Client` 的
+`WithContext` 都是指针接收者，只有内嵌的 `*redis.Client` 非 nil（`goredis.NewClient`
+造出的活客户端总是如此）时，匿名字段递归才会真的返回内嵌方法。typed-nil 的
+`*goredis.Client` 走的是 `3b9352a` 已修好的 deferred 分支，**测不出这个 bug**。
+
+⚠️ **`git stash push -- utils.go` 不能用来做负向控制**：文件已与 HEAD 一致时它是
+no-op，会得到假阴性（测的其实还是修复版）。用 `git show <commit>^:utils.go`。
+我第一次就踩了这个坑，两次「负向控制通过」是无效结论。
 
 回归测试：`utils_test.go` 的 `TestGetMethod_DeclaredShadowsPromoted`，
 形状与 `goredis.Client` / `redis.Client` 一一对应（内嵌指针 + 同名方法 + 返回 outer 类型），
