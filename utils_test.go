@@ -184,13 +184,16 @@ func TestGetMethod(t *testing.T) {
 				convey.So(func() { GetMethod(instance, "FooC") }, convey.ShouldNotPanic)
 				convey.So(func() { GetMethod(instance, "BarC") }, convey.ShouldNotPanic)
 				convey.So(func() { instance.FooC() }, convey.ShouldPanicWith, "shouldn't here")
+				// testA DECLARES FooC/BarC, so they shadow the promoted testC
+				// ones and `GetMethod` resolves to testA's: the receiver is a
+				// testA, not the embedded testC.
 				convey.So(func() {
-					reflect.ValueOf(GetMethod(instance, "FooC")).Call([]reflect.Value{reflect.ValueOf(instance.testC)})
-				}, convey.ShouldNotPanic)
+					reflect.ValueOf(GetMethod(instance, "FooC")).Call([]reflect.Value{reflect.ValueOf(instance)})
+				}, convey.ShouldPanicWith, "shouldn't here")
 				convey.So(func() { instance.BarC() }, convey.ShouldPanicWith, "shouldn't here")
 				convey.So(func() {
-					reflect.ValueOf(GetMethod(instance, "BarC")).Call([]reflect.Value{reflect.ValueOf(&instance.testC)})
-				}, convey.ShouldNotPanic)
+					reflect.ValueOf(GetMethod(instance, "BarC")).Call([]reflect.Value{reflect.ValueOf(&instance)})
+				}, convey.ShouldPanicWith, "shouldn't here")
 			})
 
 			convey.Convey("case testB", func() {
@@ -232,8 +235,14 @@ func TestGetMethod(t *testing.T) {
 				instance := testA{}
 				Mock(GetMethod(instance, "FooC")).To(func() { panic("should here") }).Build()
 				Mock(GetMethod(instance, "BarC")).To(func() { panic("should here") }).Build()
-				convey.So(func() { instance.FooC() }, convey.ShouldPanicWith, "shouldn't here") // no effect, didn't call testC.FooC()
-				convey.So(func() { instance.BarC() }, convey.ShouldPanicWith, "shouldn't here") // no effect, didn't call testC.BarC()
+				// `instance.FooC()` denotes testA's own FooC, because a method
+				// declared on the containing type shadows the promoted one. So
+				// that is what GetMethod resolves and what Mock replaces, and
+				// the call now observes the mock. Before, GetMethod returned
+				// testC.FooC -- a function this call never reaches -- so the
+				// mock silently did nothing.
+				convey.So(func() { instance.FooC() }, convey.ShouldPanicWith, "should here")
+				convey.So(func() { instance.BarC() }, convey.ShouldPanicWith, "should here")
 			})
 
 			PatchConvey("case testB", func() {
@@ -528,5 +537,50 @@ func TestGetMethod_NilEmbeddedDeferred(t *testing.T) {
 			convey.ShouldEqual, "func(mockey.nilContextOuter, string) string")
 		convey.So(reflect.TypeOf(GetMethod(nilContextFallback{}, "WithContext")).String(),
 			convey.ShouldEqual, "func(*mockey.nilContextInner, string) int")
+	})
+}
+
+// The shape below is the one that broke real builds: a wrapper client embeds a
+// *lower-level client and RE-DECLARES a method that the embedded type also has,
+// returning the wrapper type rather than the embedded one -- exactly
+// code.byted.org/kv/goredis.Client embedding *redis-v6.Client and declaring its
+// own WithContext.
+//
+// `Mock(GetMethod(c, "WithContext")).Return(c)` must mock the method that
+// `c.WithContext(...)` actually dispatches to. Resolving the embedded method
+// instead mocked a function the caller never reaches AND gave it a signature
+// the returned value does not fit, so the mock blew up from inside the hook
+// with "return args not match: ... current type: *shadowOuter".
+type shadowInner struct{ n string }
+
+func (c *shadowInner) WithContext(s string) *shadowInner { return c }
+
+type shadowOuter struct {
+	*shadowInner
+}
+
+func (c *shadowOuter) WithContext(s string) *shadowOuter {
+	c.shadowInner = c.shadowInner.WithContext(s)
+	return c
+}
+
+func TestGetMethod_DeclaredShadowsPromoted(t *testing.T) {
+	convey.Convey("a declared method shadows a promoted one", t, func() {
+		c := &shadowOuter{shadowInner: &shadowInner{n: "x"}}
+		convey.So(reflect.TypeOf(GetMethod(c, "WithContext")).String(),
+			convey.ShouldEqual, "func(*mockey.shadowOuter, string) *mockey.shadowOuter")
+		// The embedded type keeps resolving to its own method.
+		convey.So(reflect.TypeOf(GetMethod(c.shadowInner, "WithContext")).String(),
+			convey.ShouldEqual, "func(*mockey.shadowInner, string) *mockey.shadowInner")
+	})
+
+	PatchConvey("mocking the shadowing method takes effect", t, func() {
+		c := &shadowOuter{shadowInner: &shadowInner{n: "x"}}
+		sentinel := &shadowOuter{shadowInner: &shadowInner{n: "mocked"}}
+		// Returning the OUTER type is only type-correct if GetMethod resolved
+		// the outer method, so this call is the regression guard for the
+		// "return args not match" panic.
+		Mock(GetMethod(c, "WithContext")).Return(sentinel).Build()
+		convey.So(c.WithContext("ctx"), convey.ShouldEqual, sentinel)
 	})
 }

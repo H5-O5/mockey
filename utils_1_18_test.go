@@ -87,13 +87,15 @@ func TestGetMethod_Generic(t *testing.T) {
 				convey.So(func() { GetMethod(instance, "FooC") }, convey.ShouldNotPanic)
 				convey.So(func() { GetMethod(instance, "BarC") }, convey.ShouldNotPanic)
 				convey.So(func() { instance.FooC() }, convey.ShouldPanicWith, "shouldn't here")
+				// testAG DECLARES FooC/BarC, so they shadow the promoted
+				// testCG ones and GetMethod resolves to testAG's.
 				convey.So(func() {
-					reflect.ValueOf(GetMethod(instance, "FooC")).Call([]reflect.Value{reflect.ValueOf(instance.testCG)})
-				}, convey.ShouldNotPanic)
+					reflect.ValueOf(GetMethod(instance, "FooC")).Call([]reflect.Value{reflect.ValueOf(instance)})
+				}, convey.ShouldPanicWith, "shouldn't here")
 				convey.So(func() { instance.BarC() }, convey.ShouldPanicWith, "shouldn't here")
 				convey.So(func() {
-					reflect.ValueOf(GetMethod(instance, "BarC")).Call([]reflect.Value{reflect.ValueOf(&instance.testCG)})
-				}, convey.ShouldNotPanic)
+					reflect.ValueOf(GetMethod(instance, "BarC")).Call([]reflect.Value{reflect.ValueOf(&instance)})
+				}, convey.ShouldPanicWith, "shouldn't here")
 			})
 
 			convey.Convey("case testBG", func() {
@@ -122,10 +124,13 @@ func TestGetMethod_Generic(t *testing.T) {
 				instance := testAG[int]{}
 				MockGeneric(GetMethod(instance, "FooC")).To(func() { panic("should here") }).Build()
 				MockGeneric(GetMethod(instance, "BarC")).To(func() { panic("should here") }).Build()
-				convey.So(func() { instance.FooC() }, convey.ShouldPanicWith, "shouldn't here") // no effect, didn't call testCG.FooC()
-				convey.So(func() { instance.BarC() }, convey.ShouldPanicWith, "shouldn't here") // no effect, didn't call testCG.BarC()
-				convey.So(func() { instance.testCG.FooC() }, convey.ShouldPanicWith, "should here")
-				convey.So(func() { instance.testCG.BarC() }, convey.ShouldPanicWith, "should here")
+				// GetMethod now resolves testAG's own FooC/BarC (they shadow
+				// the promoted testCG ones), so the mock is what these calls
+				// observe. The embedded testCG methods are left untouched.
+				convey.So(func() { instance.FooC() }, convey.ShouldPanicWith, "should here")
+				convey.So(func() { instance.BarC() }, convey.ShouldPanicWith, "should here")
+				convey.So(func() { instance.testCG.FooC() }, convey.ShouldNotPanic)
+				convey.So(func() { instance.testCG.BarC() }, convey.ShouldNotPanic)
 			})
 
 			PatchConvey("case testBG", func() {
