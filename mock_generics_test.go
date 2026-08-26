@@ -24,6 +24,8 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/bytedance/mockey/internal/fn/type4caller"
+	"github.com/bytedance/mockey/internal/fn/type4test"
 	"github.com/bytedance/mockey/internal/tool"
 	"github.com/smartystreets/goconvey/convey"
 )
@@ -64,6 +66,15 @@ type genericMap[K comparable, V any] struct {
 //go:noinline
 func (gm *genericMap[K, V]) Get(key K) V {
 	return gm.m[key]
+}
+
+func TestGenericOptimizedCrossPackageCall(t *testing.T) {
+	PatchConvey("generic function called from another optimized package", t, func() {
+		mockGeneric(type4test.CacheLike[string]).Return(fmt.Errorf("mocked")).Build()
+		err := type4caller.CallCacheLikeString(nil, nil, "key", "data", 1)
+		convey.So(err, convey.ShouldNotBeNil)
+		convey.So(err.Error(), convey.ShouldEqual, "mocked")
+	})
 }
 
 func TestGeneric(t *testing.T) {
