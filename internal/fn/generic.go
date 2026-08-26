@@ -45,5 +45,14 @@ func (g GenericInfo) UsedParamType(n uintptr) reflect.Type {
 }
 
 func (g GenericInfo) Equal(other GenericInfo) bool {
-	return g == other
+	if g == other {
+		return true
+	}
+	if g == 0 || other == 0 {
+		return false
+	}
+	// The linker may materialize more than one dictionary for the same concrete
+	// instantiation. The first dictionary entry identifies the instantiated
+	// concrete type (or receiver), so compare it instead of dictionary addresses.
+	return *(*uintptr)(unsafe.Pointer(g)) == *(*uintptr)(unsafe.Pointer(other))
 }

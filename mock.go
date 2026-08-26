@@ -263,7 +263,7 @@ func (mocker *Mocker) build() {
 			genericInfoHook := tool.NewFuncTypeByInsertIn(analyzer.TargetType(), reflect.TypeOf(GenericInfo(0)))
 			genericInfoAdapter := analyzer.InputAdapter("getGenericInfo", genericInfoHook)
 			genericInfo, targetGenericInfo := genericInfoAdapter(args)[0].Interface().(GenericInfo), analyzer.GenericInfo()
-			if genericInfo != targetGenericInfo {
+			if !genericInfo.Equal(targetGenericInfo) {
 				tool.DebugPrintf("genericInfo mismatch: genericInfo: 0x%x, targetGenericInfo: 0x%x\n", genericInfo, targetGenericInfo)
 				return originExec(args)
 			}

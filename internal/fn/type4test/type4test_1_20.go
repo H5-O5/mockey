@@ -51,3 +51,8 @@ func (f *A[T]) Bar(i int, t T) {}
 
 //go:noinline
 func (f *A[T]) NoArgs() {}
+
+//go:noinline
+func CacheLike[T any](ctx any, client *int, key string, data T, expiration int64) error {
+	return nil
+}
