@@ -53,6 +53,21 @@ func (g GenericInfo) Equal(other GenericInfo) bool {
 	}
 	// The linker may materialize more than one dictionary for the same concrete
 	// instantiation. The first dictionary entry identifies the instantiated
-	// concrete type (or receiver), so compare it instead of dictionary addresses.
-	return *(*uintptr)(unsafe.Pointer(g)) == *(*uintptr)(unsafe.Pointer(other))
+	// concrete type (or receiver), so compare it instead of dictionary
+	// addresses.
+	//
+	// Both addresses originate outside this package: the analyzer reads one
+	// from instruction analysis, the other arrives as the live dictionary
+	// argument of a patched call. Wrappers the static analyzer does not fully
+	// model can yield a non-nil address that is not a readable dictionary, and
+	// dereferencing it raises SIGSEGV, which Go cannot recover. Probe the
+	// pages first and treat an unreadable address as "not equal": the mock
+	// then falls through to the original function, which is the same safe
+	// behavior as any other dictionary mismatch.
+	gFirst, gOK := derefUintptrSafe(uintptr(g))
+	oFirst, oOK := derefUintptrSafe(uintptr(other))
+	if !gOK || !oOK {
+		return false
+	}
+	return gFirst == oFirst
 }

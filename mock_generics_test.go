@@ -77,6 +77,32 @@ func TestGenericOptimizedCrossPackageCall(t *testing.T) {
 	})
 }
 
+// TestGenericWithInterfaceConversionBody reproduces the meego_ai
+// redis.SetCache[string] SIGSEGV in GenericInfo.Equal. The generic target's
+// body converts T to interface{} (via a non-generic callee), so the wrapper's
+// dictionary is loaded for the convT* call rather than only for the tail call.
+func TestGenericWithInterfaceConversionBody(t *testing.T) {
+	PatchConvey("generic whose body converts T to interface{}, called cross-package", t, func() {
+		mockGeneric(type4test.SetCacheLike[string]).Return(fmt.Errorf("mocked")).Build()
+		err := type4caller.CallSetCacheLikeString(nil, "key", "data", 1)
+		convey.So(err, convey.ShouldNotBeNil)
+		convey.So(err.Error(), convey.ShouldEqual, "mocked")
+	})
+}
+
+// TestGenericValueTypeExercisesConvT2E mocks a generic instantiated with a
+// non-pointer value type. Its wrapper emits an extra RIP-relative LEA for the
+// convT2E type descriptor, exercising the wrapper shape with multiple
+// RIP-relative LEAs where inst.GetGenericAddr's LEA selection is under test.
+func TestGenericValueTypeExercisesConvT2E(t *testing.T) {
+	PatchConvey("generic instantiated with a value type, cross-package", t, func() {
+		mockGeneric(type4test.SetCacheStruct[type4test.BigValue]).Return(fmt.Errorf("mocked")).Build()
+		err := type4caller.CallSetCacheStruct(nil, type4test.BigValue{A: 1, B: 2, C: 3}, 1)
+		convey.So(err, convey.ShouldNotBeNil)
+		convey.So(err.Error(), convey.ShouldEqual, "mocked")
+	})
+}
+
 func TestGeneric(t *testing.T) {
 	PatchConvey("generic", t, func() {
 		PatchConvey("func", func() {
