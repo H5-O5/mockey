@@ -30,6 +30,37 @@ const branchLen = 12
 // ret is a single-byte RET (0xc3), i.e. the shortest possible function body.
 const ret = 0xc3
 
+func TestGenericInfoInstCalcGenericInfoAddrSignedDisp32(t *testing.T) {
+	leaAddr := uintptr(0x4ce1846a)
+	tests := []struct {
+		name string
+		disp uint32
+		want uintptr
+	}{
+		{name: "positive", disp: 0x00145d07, want: leaAddr + 7 + 0x00145d07},
+		// dc/meego_ai's real wrapper: LEA RAX, [RIP+0xcaf3c79f]. The disp32 is
+		// -0x350c3861, so the dictionary sits below the wrapper at 0x17d54c10.
+		{name: "negative remote regression", disp: 0xcaf3c79f, want: 0x17d54c10},
+		{name: "largest positive", disp: 0x7fffffff, want: leaAddr + 7 + 0x7fffffff},
+		{name: "smallest negative", disp: 0x80000000, want: uintptr(int64(leaAddr) + 7 - 0x80000000)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := &genericInfoInst{lea: &posInst{
+				addr: leaAddr,
+				inst: x86asm.Inst{
+					Len:  7,
+					Args: x86asm.Args{x86asm.RAX, x86asm.Mem{Base: x86asm.RIP, Disp: int64(tt.disp)}},
+				},
+			}}
+			if got := g.calcGenericInfoAddr(); got != tt.want {
+				t.Fatalf("calcGenericInfoAddr() = %#x, want %#x (raw disp32 %#x)", got, tt.want, tt.disp)
+			}
+		})
+	}
+}
+
 // TestDisassembleShortFunction covers the case where the target function ends
 // before `required` bytes. Overwriting past its RET is safe only when the
 // remaining bytes are linker padding rather than a neighbouring function.

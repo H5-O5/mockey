@@ -283,5 +283,9 @@ func (g *genericInfoInst) matchJumpInst(jumpInst *genericJmpInst) bool {
 // calcGenericInfoAddr calculates the genericInfo from the lea instructions. Example:
 // LEA RBX, [RIP+0x145d07]
 func (g *genericInfoInst) calcGenericInfoAddr() uintptr {
-	return g.lea.addr + uintptr(g.lea.inst.Len) + uintptr(g.lea.inst.Args[1].(x86asm.Mem).Disp)
+	// x86-64 RIP-relative addressing encodes a signed 32-bit displacement.
+	// x86asm stores disp32 as an int64 after decoding it through Uint32, so cast
+	// through int32 to restore the sign before adding it to the next RIP.
+	disp := int64(int32(g.lea.inst.Args[1].(x86asm.Mem).Disp))
+	return uintptr(int64(g.lea.addr) + int64(g.lea.inst.Len) + disp)
 }
